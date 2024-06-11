@@ -1,6 +1,7 @@
 /*
- * (C) Copyright 2013-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2013
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -8,7 +9,6 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 #include <sys/ioctl.h>
 #ifdef __FreeBSD__
 #include <sys/disk.h>
@@ -18,17 +18,20 @@
 #include <linux/fs.h>
 #endif
 
+
+#include <unistd.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <libgen.h>
 
-#include "swupdate_image.h"
+#include "swupdate.h"
 #include "handler.h"
 #include "util.h"
 
 void raw_image_handler(void);
 void raw_file_handler(void);
+void raw_copyimage_handler(void);
 
 /**
  * Handle write protection for block devices
@@ -146,14 +149,65 @@ static int install_raw_image(struct img_type *img,
 	return ret;
 }
 
+static int copy_raw_image(struct img_type *img,
+	void __attribute__ ((__unused__)) *data)
+{
+	int ret;
+	int fdout, fdin;
+	struct dict_list *proplist;
+	struct dict_list_elem *entry;
+	uint32_t checksum;
+	unsigned long offset = 0;
+	size_t size;
+
+	proplist = dict_get_list(&img->properties, "copyfrom");
+
+	if (!proplist || !(entry = LIST_FIRST(proplist))) {
+		ERROR("Missing source device, no copyfrom property");
+		return -EINVAL;
+	}
+	fdin = open(entry->value, O_RDONLY);
+	if (fdin < 0) {
+		TRACE("Device %s cannot be opened: %s",
+			entry->value, strerror(errno));
+		return -ENODEV;
+	}
+
+	if (ioctl(fdin, BLKGETSIZE64, &size) < 0) {
+		ERROR("Cannot get size of %s", entry->value);
+	}
+
+	fdout = open(img->device, O_RDWR);
+	if (fdout < 0) {
+		TRACE("Device %s cannot be opened: %s",
+			img->device, strerror(errno));
+		close(fdin);
+		return -ENODEV;
+	}
+
+	ret = copyfile(fdin,
+			&fdout,
+			size,
+			&offset,
+			0,
+			0, /* no skip */
+			0, /* no compressed */
+			&checksum,
+			0, /* no sha256 */
+			false, /* no encrypted */
+			NULL, /* no IVT */
+			NULL);
+
+	close(fdout);
+	return ret;
+}
+
 static int install_raw_file(struct img_type *img,
 	void __attribute__ ((__unused__)) *data)
 {
 	char path[255];
-	char tmp_path[255];
-	int fdout = -1;
-	int ret = -1;
-	int cleanup_ret = 0;
+	int fdout;
+	int ret = 0;
 	int use_mount = (strlen(img->device) && strlen(img->filesystem)) ? 1 : 0;
 	char* DATADST_DIR = alloca(strlen(get_tmpdir())+strlen(DATADST_DIR_SUFFIX)+1);
 	sprintf(DATADST_DIR, "%s%s", get_tmpdir(), DATADST_DIR_SUFFIX);
@@ -174,7 +228,7 @@ static int install_raw_file(struct img_type *img,
 		if (snprintf(path, sizeof(path), "%s%s",
 					 DATADST_DIR, img->path) >= (int)sizeof(path)) {
 			ERROR("Path too long: %s%s", DATADST_DIR, img->path);
-			goto cleanup;
+			return -1;
 		}
 	} else {
 		if (snprintf(path, sizeof(path), "%s", img->path) >= (int)sizeof(path)) {
@@ -183,74 +237,36 @@ static int install_raw_file(struct img_type *img,
 		}
 	}
 
-	if (strtobool(dict_get_value(&img->properties, "atomic-install"))) {
-		if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path) >= (int)sizeof(tmp_path)) {
-			ERROR("Temp path too long: %s.tmp", img->path);
-			ret = -1;
-			goto cleanup;
-		}
-	}
-	else {
-		snprintf(tmp_path, sizeof(tmp_path), "%s", path);
-	}
-	TRACE("Installing file %s on %s", img->fname, tmp_path);
+	TRACE("Installing file %s on %s",
+		img->fname, path);
 
 	if (strtobool(dict_get_value(&img->properties, "create-destination"))) {
 		TRACE("Creating path %s", path);
-		ret = mkpath(dirname(strdupa(path)), 0755);
-		if (ret < 0) {
+		fdout = mkpath(dirname(strdupa(path)), 0755);
+		if (fdout < 0) {
 			ERROR("I cannot create path %s: %s", path, strerror(errno));
-			goto cleanup;
+			return -1;
 		}
 	}
 
-	fdout = openfileoutput(tmp_path);
-	if (fdout < 0) {
-		ret = -1;
-		goto cleanup;
-	}
+	fdout = openfileoutput(path);
+	if (fdout < 0)
+		return fdout;
 	if (!img_check_free_space(img, fdout)) {
-		ret = -ENOSPC;
-		goto cleanup;
+		return -ENOSPC;
 	}
 
 	ret = copyimage(&fdout, img, NULL);
-	if (ret < 0) {
+	if (ret< 0) {
 		ERROR("Error copying extracted file");
-		goto cleanup;
 	}
-
-	if (fsync(fdout)) {
-		ERROR("Error writing %s to disk: %s", tmp_path, strerror(errno));
-		ret = -1;
-		goto cleanup;
-	}
-
 	close(fdout);
-	fdout = 0;
-
-	if (strtobool(dict_get_value(&img->properties, "atomic-install"))) {
-		TRACE("Renaming file %s to %s", tmp_path, path);
-		if (rename(tmp_path, path)) {
-			ERROR("Error renaming %s to %s: %s", tmp_path, path, strerror(errno));
-			ret = -1;
-			goto cleanup;
-		}
-	}
-
-	ret = 0;
-
-cleanup:
-	if (fdout > 0)
-		close(fdout);
 
 	if (use_mount) {
-		cleanup_ret = swupdate_umount(DATADST_DIR);
-		if (cleanup_ret)
-			WARN("Can't unmount path %s: %s", DATADST_DIR, strerror(errno));
+		swupdate_umount(DATADST_DIR);
 	}
 
-	return (ret ? ret : cleanup_ret);
+	return ret;
 }
 
 __attribute__((constructor))
@@ -265,4 +281,11 @@ void raw_file_handler(void)
 {
 	register_handler("rawfile", install_raw_file,
 				FILE_HANDLER, NULL);
+}
+
+__attribute__((constructor))
+void raw_copyimage_handler(void)
+{
+	register_handler("rawcopy", copy_raw_image,
+				SCRIPT_HANDLER | NO_DATA_HANDLER, NULL);
 }

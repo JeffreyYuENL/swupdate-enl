@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2021
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -23,14 +23,12 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/select.h>
-#include <sys/reboot.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <getopt.h>
-#include <json-c/json.h>
 
 #include "network_ipc.h"
 #include <progress_ipc.h>
@@ -63,13 +61,6 @@ static void usage_setversion(const char *program) {
 static void usage_send_to_hawkbit(const char *program) {
 	fprintf(stdout, "\t %s <action id> <status> <finished> "
 			"<execution> <detail 1> <detail 2> ..\n", program);
-	fprintf(stdout, "\t\t <action -id> : 0 - asks SWUpdate to find the action_id (first env, then network)\n");
-	fprintf(stdout, "\t\t                > 0 - valid action_id stored by application during update\n");
-	fprintf(stdout, "\t\t <status>     : a valid state, see values in state.h\n");
-	fprintf(stdout, "\t\t <finished>   : one of \"success\" \"failure\" \"none\"\n");
-	fprintf(stdout, "\t\t <execution>  : one of \"closed\",\"proceeding\",\"canceled\", \"scheduled\", \"rejected\", \"resumed\", \"downloaded\", \"download\"\n");
-	fprintf(stdout, "\t\t <details>    : strings that are passed and stored by Hawkbit server (User information)\n");
-
 }
 
 static void usage_sysrestart(const char *programname)
@@ -88,24 +79,6 @@ static void usage_hawkbitcfg(const char *program) {
 		"\t\t-p, --polling-time      : Set polling time (0=from server) to ask the backend server\n"
 		"\t\t-e, --enable            : Enable polling of backend server\n"
 		"\t\t-d, --disable           : Disable polling of backend server\n"
-		"\t\t-t, --trigger           : Enable and check for update\n"
-		);
-}
-
-static void usage_monitor(const char *program) {
-	fprintf(stdout,"\t %s \n", program);
-	fprintf(stdout,
-		"\t\t-s, --socket <path>     : path to progress IPC socket\n"
-		"\t\t-h, --help              : print this help and exit\n"
-		);
-}
-
-static void usage_dwlurl(const char *program) {
-	fprintf(stdout,"\t %s \n", program);
-	fprintf(stdout,
-		"\t\t-u, --url <url>         : URL to be passed to the downloader\n"
-		"\t\t-c, --userpassword user:pass : user / password to be used to download\n"
-		"\t\t-h, --help              : print this help and exit\n"
 		);
 }
 
@@ -154,7 +127,6 @@ static struct option hawkbitcfg_options[] = {
 	{"polling-time", required_argument, NULL, 'p'},
 	{"enable", no_argument, NULL, 'e'},
 	{"disable", no_argument, NULL, 'd'},
-	{"trigger", no_argument, NULL, 't'},
 	{NULL, 0, NULL, 0}
 };
 
@@ -165,7 +137,6 @@ static int hawkbitcfg(cmd_t  __attribute__((__unused__)) *cmd, int argc, char *a
 	int c;
 	unsigned long polling_time;
 	bool enable = false;
-	bool trigger = false;
 	int opt_e = 0;
 	int opt_p = 0;
 
@@ -177,7 +148,7 @@ static int hawkbitcfg(cmd_t  __attribute__((__unused__)) *cmd, int argc, char *a
 	buf = msg.data.procmsg.buf;
 
 	/* Process options with getopt */
-	while ((c = getopt_long(argc, argv, "p:edth",
+	while ((c = getopt_long(argc, argv, "p:edh",
 				hawkbitcfg_options, NULL)) != EOF) {
 		switch (c) {
 		case 'p':
@@ -187,11 +158,9 @@ static int hawkbitcfg(cmd_t  __attribute__((__unused__)) *cmd, int argc, char *a
 			break;
 		case 'e':
 		case 'd':
-		case 't':
 			msg.data.procmsg.cmd = CMD_ENABLE;
 			opt_e = 1;
-			trigger = (c == 't');
-			enable = (c == 'e') || trigger;
+			enable = (c == 'e');
 			break;
 		}
 	}
@@ -209,83 +178,10 @@ static int hawkbitcfg(cmd_t  __attribute__((__unused__)) *cmd, int argc, char *a
 		send_msg(&msg);
 	}
 	if (opt_e) {
-		snprintf(buf, size, trigger ? "{ \"trigger\" : %s}" : "{ \"enable\" : %s}", enable ? "true" : "false");
+		snprintf(buf, size, "{ \"enable\" : %s}", enable ? "true" : "false");
 		msg.data.procmsg.len = strnlen(buf, size);
 		send_msg(&msg);
 	}
-
-	exit(0);
-}
-
-static struct option dwlurl_options[] = {
-	{"help", no_argument, NULL, 'h'},
-	{"url", required_argument, NULL, 'u'},
-	{"userpassword", required_argument, NULL, 'c'},
-	{NULL, 0, NULL, 0}
-};
-
-
-static int dwlurl(cmd_t  __attribute__((__unused__)) *cmd, int argc, char *argv[]) {
-	ipc_message msg;
-	size_t size, len;
-	char *buf;
-	int c;
-	int opt_u = 0, opt_c = 0;
-	char *url = NULL, *user = NULL;
-
-	memset(&msg, 0, sizeof(msg));
-	msg.data.procmsg.source = SOURCE_DOWNLOADER;
-	msg.type = SWUPDATE_SUBPROCESS;
-	msg.data.procmsg.cmd = CMD_SET_DOWNLOAD_URL;
-
-	size = sizeof(msg.data.procmsg.buf);
-	buf = msg.data.procmsg.buf;
-
-	/* Process options with getopt */
-	while ((c = getopt_long(argc, argv, "u:c:",
-				dwlurl_options, NULL)) != EOF) {
-		switch (c) {
-		case 'u':
-			opt_u = 1;
-			if (url) free(url);
-			url = strdup(optarg);
-			break;
-		case 'c':
-			opt_c = 1;
-			if (user) free(user);
-			user = strdup(optarg);
-			break;
-		}
-	}
-
-	/*
-	 * Build a json string with the command line parameters
-	 * do not check anything, let SWUpdate
-	 * doing the checks
-	 * An error or a NACK is returned in
-	 * case of failure
-	 */
-	if (!opt_u) { /*this is mandatory */
-		fprintf(stderr, "url is mandatory, skipping..\n");
-		exit(1);
-	}
-	len = snprintf(buf, size, "{ \"url\": \"%s\"", url);
-	if (len == size) {
-		fprintf(stderr, "URL is too long : %s\n", url);
-		exit(1);
-	}
-	if (opt_c) {
-		len += snprintf(buf + len, size - len, ", \"userpassword\" : \"%s\" }",
-				user);
-	} else {
-		len += snprintf(buf + len, size - len, "}");
-	}
-	if (len == size) {
-		fprintf(stderr, "URL + credentials too long, not supported\n");
-		exit(1);
-	}
-	msg.data.procmsg.len = len;
-	send_msg(&msg);
 
 	exit(0);
 }
@@ -358,6 +254,8 @@ static int sendtohawkbit(cmd_t *cmd, int argc, char *argv[]) {
 	return 0;
 }
 
+#if defined(CONFIG_JSON)
+#include <json-c/json.h>
 static int gethawkbitstatus(cmd_t  __attribute__((__unused__)) *cmd,
 			    int  __attribute__((__unused__)) argc,
 			    char  __attribute__((__unused__)) *argv[]) {
@@ -393,6 +291,14 @@ static int gethawkbitstatus(cmd_t  __attribute__((__unused__)) *cmd,
 	}
 
 }
+#else
+static int gethawkbitstatus(cmd_t __attribute__((__unused__)) *cmd,
+			    int __attribute__((__unused__)) argc,
+			    char **argv) {
+	fprintf(stderr, "%s: JSON not available, exiting..\n", argv[1]);
+	return 1;
+}
+#endif
 
 static int sendaes(cmd_t *cmd, int argc, char *argv[]) {
 	char *key, *ivt;
@@ -652,8 +558,8 @@ static int sysrestart(cmd_t  __attribute__((__unused__)) *cmd, int argc, char *a
 			fprintf(stdout, "Ready to reboot !\n");
 			restart_system(ndevs);
 			sleep(5);
-			sync();
-			if (reboot(RB_AUTOBOOT) < 0) { /* It should never happen */
+
+			if (system("reboot") < 0) { /* It should never happen */
 				fprintf(stdout, "Please reset the board.\n");
 			}
 			break;
@@ -678,85 +584,6 @@ static int sysrestart(cmd_t __attribute__((__unused__)) *cmd,
 }
 #endif
 
-static struct option monitor_options[] = {
-	{"help", no_argument, NULL, 'h'},
-	{"socket", required_argument, NULL, 's'},
-	{NULL, 0, NULL, 0}
-};
-
-static int monitor(cmd_t  __attribute__((__unused__)) *cmd, int argc, char *argv[]) {
-	char *socket_path = NULL;
-
-	/* Process options with getopt */
-	int c;
-	while ((c = getopt_long(argc, argv, "hs:", monitor_options, NULL)) != EOF) {
-		switch (c) {
-		case 's':
-			free(socket_path);
-			socket_path = strdup(optarg);
-			break;
-		case 'h':
-			usage_monitor(argv[0]);
-			exit(0);
-			break;
-		default:
-			usage_monitor(argv[0]);
-			exit(1);
-			break;
-		}
-	}
-
-	int connfd = -1;
-	struct progress_msg msg;
-	while (1) {
-		if (connfd < 0) {
-			if (!socket_path)
-				connfd = progress_ipc_connect(true);
-			else
-				connfd = progress_ipc_connect_with_path(socket_path, true);
-		}
-
-		/*
-		 * if still fails, try later
-		 */
-		if (connfd < 0) {
-			sleep(1);
-			continue;
-		}
-
-		if (progress_ipc_receive(&connfd, &msg) <= 0) {
-			continue;
-		}
-
-		if (msg.infolen > 0) {
-			/*
-			 * check that msg is NULL terminated
-			 */
-			if (msg.infolen > sizeof(msg.info) - 1) {
-				msg.infolen = sizeof(msg.info) - 1;
-			}
-			msg.info[msg.infolen] = '\0';
-		}
-
-		/*
-		 * ensure strings are null-terminated (they usually are by construction)
-		 */
-		msg.hnd_name[sizeof(msg.hnd_name) - 1] = '\0';
-		msg.cur_image[sizeof(msg.cur_image) - 1] = '\0';
-
-		fprintf(stdout, "[{ \"apiversion\": 0x%x, \"status\": %u, \"dwl_percent\": %u, \"dwl_bytes\": %llu"
-				", \"nsteps\": %u, \"cur_step\": %u, \"cur_percent\": %u, \"cur_image\": \"%s\""
-				", \"hnd_name\": \"%s\", \"source\": %u, \"infolen\": %u }",
-				msg.apiversion, msg.status, msg.dwl_percent,
-				msg.dwl_bytes, msg.nsteps, msg.cur_step,
-				msg.cur_percent, msg.cur_image, msg.hnd_name,
-				msg.source, msg.infolen);
-                if (msg.infolen > 0) fprintf(stdout, ", %s]\n", msg.info); else fprintf(stdout, "]\n");
-
-		fflush(stdout);
-	}
-	return 0;
-}
 
 /*
  * List of implemented commands
@@ -768,8 +595,6 @@ cmd_t commands[] = {
 	{"hawkbitcfg", hawkbitcfg, usage_hawkbitcfg},
 	{"gethawkbit", gethawkbitstatus, usage_gethawkbitstatus},
 	{"sysrestart", sysrestart, usage_sysrestart},
-	{"monitor", monitor, usage_monitor},
-	{"dwlurl", dwlurl, usage_dwlurl},
 	{NULL, NULL, NULL}
 };
 

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2017
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * Author: Christian Storm
  * Copyright (C) 2016, Siemens AG

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2013
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -14,7 +14,8 @@
 #include <errno.h>
 
 #include "generated/autoconf.h"
-#include "swupdate_image.h"
+#include "swupdate.h"
+#include "swupdate_dict.h"
 #include "handler.h"
 #include "util.h"
 #include "bootloader.h"
@@ -32,7 +33,6 @@ static int install_boot_environment(struct img_type *img,
 	char *buf;
 	char filename[MAX_IMAGE_FNAME];
 	struct stat statbuf;
-	bool no_override = false;	/* do not override variables in bootenv */
 
 	if (snprintf(filename, sizeof(filename), "%s%s", get_tmpdirscripts(),
 		     img->fname) >= (int)sizeof(filename)) {
@@ -75,7 +75,6 @@ static int install_boot_environment(struct img_type *img,
 		return -ENOMEM;
 	}
 
-	no_override = strtobool(dict_get_value(&img->properties, "nooverride"));
 	while (fgets(buf, MAX_BOOT_SCRIPT_LINE_LENGTH, fp)) {
 		char **pair = NULL;
 		unsigned int cnt;
@@ -90,17 +89,6 @@ static int install_boot_environment(struct img_type *img,
 
 		pair = string_split(buf, '=');
 		cnt = count_string_array((const char **)pair);
-
-		/*
-		 * Skip if a variable was already parsed in the bootenv
-		 * section, in that case it is already present in the dictionary.
-		 * This avoid to override with the value in file
-		 */
-		if (cnt && no_override && dict_get_value(img->bootloader, pair[0])) {
-			TRACE("Variable %s already set, skipping..", pair[0]);
-			free_string_array(pair);
-			continue;
-		}
 
 		switch (cnt) {
 		case 2:

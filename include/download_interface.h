@@ -1,16 +1,19 @@
 /*
  * (C) Copyright 2016
- * Stefano Babic <stefano.babic@swupdate.org>
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
 
 
-#pragma once
+#ifndef _DWL_INTERFACE_H
+#define _DWL_INTERFACE_H
 
 /*
  * This is used by swupdate to start the Downloader Process
  */
-int start_download_server(const char *cfgfname, int argc, char *argv[]);
+int start_download(const char *cfgfname, int argc, char *argv[]);
 
 void download_print_help(void);
+
+#endif

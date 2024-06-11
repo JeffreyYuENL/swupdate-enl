@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2014-2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * Hamming code from
  * https://github.com/martinezjavier/writeloader
@@ -25,8 +25,8 @@
 #include <sys/ioctl.h>
 
 #include <mtd/mtd-user.h>
+#include "swupdate.h"
 #include "handler.h"
-#include "swupdate_image.h"
 #include "util.h"
 #include "flash.h"
 #include "progress.h"
@@ -91,7 +91,7 @@ static int flash_write_nand(int mtdnum, struct img_type *img)
 	unsigned char *filebuf = NULL;
 	size_t filebuf_max = 0;
 	size_t filebuf_len = 0;
-	long long mtdoffset = img->seek;
+	long long mtdoffset = 0;
 	int ifd = img->fdin;
 	int fd = -1;
 	bool failed = true;
@@ -104,18 +104,11 @@ static int flash_write_nand(int mtdnum, struct img_type *img)
 	if (!img->size)
 		return 0;
 
-	if (mtdoffset & (mtd->min_io_size - 1)) {
-		ERROR("The start address is not page-aligned !\n"
-			   "The pagesize of this NAND Flash is 0x%x.\n",
-			   mtd->min_io_size);
-		return -EIO;
-	}
-
 	pagelen = mtd->min_io_size;
 	imglen = img->size;
 	snprintf(mtd_device, sizeof(mtd_device), "/dev/mtd%d", mtdnum);
 
-	if ((imglen / pagelen) * mtd->min_io_size > mtd->size - mtdoffset) {
+	if ((imglen / pagelen) * mtd->min_io_size > mtd->size) {
 		ERROR("Image %s does not fit into mtd%d", img->fname, mtdnum);
 		return -EIO;
 	}
@@ -126,7 +119,7 @@ static int flash_write_nand(int mtdnum, struct img_type *img)
 		return -EINVAL;
 	}
 
-	if(flash_erase_sector(mtdnum, img->seek, img->size)) {
+	if(flash_erase_sector(mtdnum, img->offset, img->size)) {
 		ERROR("I cannot erasing %s",
 			img->device);
 		return -1;
@@ -308,20 +301,9 @@ static int flash_write_nor(int mtdnum, struct img_type *img)
 		return -ENODEV;
 	}
 
-	long long size = get_output_size(img, true);
-	if (size < 0) {
-		size = get_mtd_size(mtdnum);
-		if (size < 0) {
-			ERROR("Could not get MTD %d device size", mtdnum);
-			return -ENODEV;
-		}
-
-		WARN("decompression-size not set, erasing flash device %s from %lld to %lld",
-			img->device, img->seek, size);
-	}
-	if (flash_erase_sector(mtdnum, img->seek, size)) {
-		ERROR("Failed to erase sectors on /dev/mtd%d (start: %llu, size: %lld)",
-			mtdnum, img->seek, size);
+	if(flash_erase_sector(mtdnum, img->offset, img->size)) {
+		ERROR("I cannot erasing %s",
+			img->device);
 		return -1;
 	}
 
@@ -332,13 +314,13 @@ static int flash_write_nor(int mtdnum, struct img_type *img)
 	}
 
 	ret = copyimage(&fdout, img, NULL);
-	close(fdout);
 
 	/* tell 'nbytes == 0' (EOF) from 'nbytes < 0' (read error) */
 	if (ret < 0) {
 		ERROR("Failure installing into: %s", img->device);
 		return -1;
 	}
+	close(fdout);
 	return 0;
 }
 

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2013
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -26,13 +26,12 @@
 #include <regex.h>
 #include <string.h>
 #include <dirent.h>
-#include "swupdate_dict.h"
-#include "swupdate_image.h"
 
 #if defined(__linux__)
 #include <sys/statvfs.h>
 #endif
 
+#include "swupdate.h"
 #include "util.h"
 #include "generated/autoconf.h"
 
@@ -52,12 +51,6 @@ struct decryption_key {
 };
 
 static struct decryption_key *aes_key = NULL;
-
-/*
- * Configuration file for fw_env.config
- */
-
-static char *fwenv_config = NULL;
 
 char *sdup(const char *str) {
 	char *p;
@@ -162,8 +155,8 @@ void swupdate_create_directory(const char* path) {
 		return;
 	}
 	if (mkdir(dpath, 0777)) {
-		WARN("Directory %s cannot be created: %s",
-			 dpath, strerror(errno));
+		WARN("Directory %s cannot be created due to : %s",
+			 path, strerror(errno));
 	}
 	free(dpath);
 }
@@ -329,6 +322,71 @@ int mkpath(char *dir, mode_t mode)
 	return 0;
 }
 
+/*
+ * This function is strict bounded with the hardware
+ * It reads some GPIOs to get the hardware revision
+ */
+int get_hw_revision(struct hw_type *hw)
+{
+	FILE *fp;
+	int ret;
+	char *b1, *b2;
+#ifdef CONFIG_HW_COMPATIBILITY_FILE
+#define HW_FILE CONFIG_HW_COMPATIBILITY_FILE
+#else
+#define HW_FILE "/etc/hwrevision"
+#endif
+
+	if (!hw)
+		return -EINVAL;
+
+	/*
+	 * do not overwrite if it is already set
+	 * (maybe from command line)
+	 */
+	if (strlen(hw->boardname))
+		return 0;
+
+	memset(hw->boardname, 0, sizeof(hw->boardname));
+	memset(hw->revision, 0, sizeof(hw->revision));
+
+	/*
+	 * Not all boards have pins for revision number
+	 * check if there is a file containing theHW revision number
+	 */
+	fp = fopen(HW_FILE, "r");
+	if (!fp)
+		return -1;
+
+	ret = fscanf(fp, "%ms %ms", &b1, &b2);
+	fclose(fp);
+
+	if (ret != 2) {
+		TRACE("Cannot find Board Revision");
+		if(ret == 1)
+			free(b1);
+		return -1;
+	}
+
+	if ((strlen(b1) > (SWUPDATE_GENERAL_STRING_SIZE) - 1) ||
+		(strlen(b2) > (SWUPDATE_GENERAL_STRING_SIZE - 1))) {
+		ERROR("Board name or revision too long");
+		ret = -1;
+		goto out;
+	}
+
+	strlcpy(hw->boardname, b1, sizeof(hw->boardname));
+	strlcpy(hw->revision, b2, sizeof(hw->revision));
+
+	ret = 0;
+
+out:
+	free(b1);
+	free(b2);
+
+	return ret;
+}
+
 /**
  * hwid_match - try to match a literal or RE hwid
  * @rev: literal or RE specification
@@ -369,6 +427,39 @@ int hwid_match(const char* rev, const char* hwrev)
 out:
 	return ret;
 }
+
+/*
+ * The HW revision of the board *MUST* be inserted
+ * in the sw-description file
+ */
+#ifdef CONFIG_HW_COMPATIBILITY
+int check_hw_compatibility(struct swupdate_cfg *cfg)
+{
+	struct hw_type *hw;
+	int ret;
+
+	ret = get_hw_revision(&cfg->hw);
+	if (ret < 0)
+		return -1;
+
+	TRACE("Hardware %s Revision: %s", cfg->hw.boardname, cfg->hw.revision);
+	LIST_FOREACH(hw, &cfg->hardware, next) {
+		if (hw &&
+		    (!hwid_match(hw->revision, cfg->hw.revision))) {
+			TRACE("Hardware compatibility verified");
+			return 0;
+		}
+	}
+
+	return -1;
+}
+#else
+int check_hw_compatibility(struct swupdate_cfg
+		__attribute__ ((__unused__)) *cfg)
+{
+	return 0;
+}
+#endif
 
 uintmax_t
 from_ascii (char const *where, size_t digs, unsigned logbase)
@@ -520,23 +611,6 @@ unsigned char *get_aes_ivt(void) {
 	return aes_key->ivt;
 }
 
-bool is_hex_str(const char *ascii) {
-	unsigned int i, size;
-
-	if (!ascii)
-		return false;
-
-	size = strlen(ascii);
-	if (!size)
-		return false;
-
-	for (i = 0;  i < size; ++i) {
-		if (!isxdigit(ascii[i]))
-			return false;
-	}
-	return true;
-}
-
 int set_aes_key(const char *key, const char *ivt)
 {
 	int ret;
@@ -549,11 +623,6 @@ int set_aes_key(const char *key, const char *ivt)
 		aes_key = (struct decryption_key *)calloc(1, sizeof(*aes_key));
 		if (!aes_key)
 			return -ENOMEM;
-	}
-
-	if (strlen(ivt) != (AES_BLK_SIZE*2) || !is_hex_str(ivt)) {
-		ERROR("Invalid ivt");
-		return -EINVAL;
 	}
 
 	ret = ascii_to_bin(aes_key->ivt, sizeof(aes_key->ivt), ivt);
@@ -573,41 +642,33 @@ int set_aes_key(const char *key, const char *ivt)
 		aes_key->keylen = keylen / 2;
 		break;
 	default:
-		ERROR("Invalid aes_key length");
 		return -EINVAL;
 	}
-	ret |= !is_hex_str(key);
 	ret |= ascii_to_bin(aes_key->key, aes_key->keylen, key);
 #endif
 
 	if (ret) {
-		ERROR("Invalid aes_key");
 		return -EINVAL;
 	}
 
 	return 0;
 }
 
-const char *get_fwenv_config(void) {
-	if (!fwenv_config)
-#if defined(CONFIG_UBOOT)
-		return CONFIG_UBOOT_FWENV;
-#else
-		return NULL;
-#endif
-	return fwenv_config;
+int set_aes_ivt(const char *ivt)
+{
+	int ret;
+
+	if (!aes_key)
+		return -EFAULT;
+
+	ret = ascii_to_bin(aes_key->ivt, sizeof(aes_key->ivt), ivt);
+
+	if (ret) {
+		return -EINVAL;
+	}
+
+	return 0;
 }
-
-void set_fwenv_config(const char *fname) {
-	if (!fname)
-		return;
-
-	if (fwenv_config)
-		free(fwenv_config);
-
-	fwenv_config = strdup(fname);
-}
-
 
 char** string_split(const char* in, const char d)
 {
@@ -682,27 +743,7 @@ void free_string_array(char **nodes)
 	free(nodes);
 }
 
-/*
- * Determines if ustrtoull() consumes a size-type delimiter
- * from the provided string.
- */
-int size_delimiter_match(const char *size)
-{
-	char *suffix = NULL, *usuffix = NULL;
-	strtoull(size, &suffix, 10);
-	ustrtoull(size, &usuffix, 10);
-	return suffix != usuffix;
-}
-
-/*
- * Like strtoull(), but automatically scales the conversion
- * result by size-type units, and only returns a pointer to
- * the size unit in the string if requested by the caller.
- *
- * Sets errno to ERANGE if strtoull() found no digits or
- * encountered an overflow, and returns 0 in both cases.
- */
-unsigned long long ustrtoull(const char *cp, char **endptr, unsigned int base)
+unsigned long long ustrtoull(const char *cp, unsigned int base)
 {
 	errno = 0;
 	char *endp = NULL;
@@ -715,17 +756,14 @@ unsigned long long ustrtoull(const char *cp, char **endptr, unsigned int base)
 
 	if (cp == endp || (result == ULLONG_MAX && errno == ERANGE)) {
 		errno = ERANGE;
-		result = 0;
-		goto out;
+		return 0;
 	}
 
 	switch (*endp) {
 	case 'G':
-	case 'g':
 		result *= 1024;
 		/* fall through */
 	case 'M':
-	case 'm':
 		result *= 1024;
 		/* fall through */
 	case 'K':
@@ -736,21 +774,8 @@ unsigned long long ustrtoull(const char *cp, char **endptr, unsigned int base)
 				endp += 3;
 			else
 				endp += 2;
-		} else {
-			endp += 1;
 		}
-	case 0:
-		break;
-	default:
-		errno = EINVAL;
-		result = 0;
-		goto out;
 	}
-
-out:
-	if (endptr)
-		*endptr = endp;
-
 	return result;
 }
 
@@ -793,9 +818,6 @@ int swupdate_mount(const char *device, const char *dir, const char *fstype)
 	return nmount(iov, iovlen, mntflags);
 #else
 	/* Not implemented for this OS, no specific errno. */
-	(void)device;
-	(void)dir;
-	(void)fstype;
 	errno = 0;
 	return -1;
 #endif
@@ -810,7 +832,6 @@ int swupdate_umount(const char *dir)
 	return unmount(dir, mntflags);
 #else
 	/* Not implemented for this OS, no specific errno. */
-	(void)dir;
 	errno = 0;
 	return -1;
 #endif
@@ -901,68 +922,12 @@ size_t snescape(char *dst, size_t n, const char *src)
 }
 
 /*
- * If major:minor is a containerized filesystem, e.g., in case of LUKS,
- * return the pointed-to device name.
+ * This returns the device name where rootfs is mounted
  */
+
 static int filter_slave(const struct dirent *ent) {
 	return (strcmp(ent->d_name, ".") && strcmp(ent->d_name, ".."));
 }
-static char *get_root_containerized_fs(int major, int minor)
-{
-	struct dirent **devlist = NULL;
-	char *devname = NULL;
-	char buf[23+4+7+1];
-	int ret = snprintf(buf, sizeof(buf), "/sys/dev/block/%d:%d/slaves", major, minor);
-	if (ret < 0 || ret >= sizeof(buf)) {
-		return NULL;
-	}
-	if (scandir(buf, &devlist, filter_slave, NULL) == 1) {
-		devname = strdup(devlist[0]->d_name);
-	}
-	free(devlist);
-	return devname;
-}
-
-/*
- * Return the real full path to a device, or NULL.
- */
-static char *getroot_abs_path(char* devname)
-{
-	int fd;
-	char *path;
-
-	if (!devname)
-		return NULL;
-
-	if ((path = realpath(devname, NULL))) {
-		if ((fd = open(path, O_RDWR | O_CLOEXEC)) != -1) {
-			(void)close(fd);
-			free(devname);
-			return path;
-		}
-		free(path);
-	}
-
-	char* prefix = (char*)"/dev/";
-	int prefix_len = strlen(prefix);
-	int devname_len = strnlen(devname, PATH_MAX - prefix_len - 1);
-	char *tmp = alloca(sizeof(char) * (prefix_len + devname_len + 1));
-	(void)strcpy(strcpy(tmp, prefix) + prefix_len, devname);
-	free(devname);
-	if ((path = realpath(tmp, NULL))) {
-		if ((fd = open(path, O_RDWR | O_CLOEXEC)) != -1) {
-			(void)close(fd);
-			return path;
-		}
-		free(path);
-	}
-	return NULL;
-}
-
-/*
- * Return the rootfs's device name from /proc/partitions supporting
- * containerized filesystems such as, e.g., LUKS.
- */
 static char *get_root_from_partitions(void)
 {
 	struct stat info;
@@ -970,7 +935,8 @@ static char *get_root_from_partitions(void)
 	char *devname = NULL;
 	unsigned long major, minor, nblocks;
 	char buf[256];
-	int ret, dev_major, dev_minor;
+	int ret, dev_major, dev_minor, n;
+	struct dirent **devlist = NULL;
 
 	if (stat("/", &info) < 0)
 		return NULL;
@@ -978,10 +944,18 @@ static char *get_root_from_partitions(void)
 	dev_major = info.st_dev / 256;
 	dev_minor = info.st_dev % 256;
 
-	devname = get_root_containerized_fs(dev_major, dev_minor);
-	if (devname) {
-		return getroot_abs_path(devname);
+	/*
+	 * Check if this is just a container, for example in case of LUKS
+	 * Search if the device has slaves pointing to another device
+	 */
+	snprintf(buf, sizeof(buf) - 1, "/sys/dev/block/%d:%d/slaves", dev_major, dev_minor);
+	n = scandir(buf, &devlist, filter_slave, NULL);
+	if (n == 1) {
+		devname = strdup(devlist[0]->d_name);
+		free(devlist);
+		return devname;
 	}
+	free(devlist);
 
 	fp = fopen("/proc/partitions", "r");
 	if (!fp)
@@ -994,7 +968,7 @@ static char *get_root_from_partitions(void)
 			continue;
 		if ((major == dev_major) && (minor == dev_minor)) {
 			fclose(fp);
-			return getroot_abs_path(devname);
+			return devname;
 		}
 		free(devname);
 	}
@@ -1011,30 +985,13 @@ static char *get_root_from_partitions(void)
 static char *get_root_from_mountinfo(void)
 {
 	char *mnt_point, *device = NULL;
-	unsigned int dev_major, dev_minor;
 	FILE *fp = fopen("/proc/self/mountinfo", "r");
-	if (!fp)
-		return NULL;
-	while (fp && !feof(fp)) {
+	while (fp && !feof(fp)){
 		/* format: https://www.kernel.org/doc/Documentation/filesystems/proc.txt */
-		if (fscanf(fp, "%*s %*s %u:%u %*s %ms %*s %*[-] %*s %ms %*s",
-			   &dev_major, &dev_minor, &mnt_point, &device) == 4) {
+		if (fscanf(fp, "%*s %*s %*u:%*u %*s %ms %*s %*[-] %*s %ms %*s",
+			   &mnt_point, &device) == 2) {
 			if ( (!strcmp(mnt_point, "/")) && (strcmp(device, "none")) ) {
 				free(mnt_point);
-				char *dpath;
-				if ((dpath = realpath(device, NULL))) {
-					free(device);
-					device = dpath;
-					struct stat dinfo;
-					if (stat(device, &dinfo) == 0) {
-						dev_major = dinfo.st_rdev / 256;
-						dev_minor = dinfo.st_rdev % 256;
-					}
-				}
-				if ((dpath = get_root_containerized_fs(dev_major, dev_minor))) {
-					free(device);
-					device = getroot_abs_path(dpath);
-				}
 				break;
 			}
 			free(mnt_point);
@@ -1077,21 +1034,15 @@ static char *get_root_from_cmdline(void)
 
 	if (ret > 0) {
 		parms = string_split(buf, ' ');
-		if (!parms)
-			goto out;
 		int nparms = count_string_array((const char **)parms);
 		for (unsigned int index = 0; index < nparms; index++) {
 			if (!strncmp(parms[index], "root=", strlen("root="))) {
 				const char *value = parms[index] + strlen("root=");
-				root = getroot_abs_path(strdup(value));
-				if (!root) {
-					root = strdup(value);
-				}
+				root = strdup(value);
 				break;
 			}
 		}
 	}
-out:
 	fclose(fp);
 	free_string_array(parms);
 	free(buf);
@@ -1104,9 +1055,9 @@ char *get_root_device(void)
 
 	root = get_root_from_partitions();
 	if (!root)
-		root = get_root_from_mountinfo();
-	if (!root)
 		root = get_root_from_cmdline();
+	if (!root)
+		root = get_root_from_mountinfo();
 
 	return root;
 }
@@ -1141,8 +1092,6 @@ int read_lines_notify(int fd, char *buf, int buf_size, int *buf_offset,
 	}
 
 	char **lines = string_split(buf, '\n');
-	if (!lines)
-		return -errno;
 	int nlines = count_string_array((const char **)lines);
 	/*
 	 * If the buffer is full and there is only one line,
@@ -1186,7 +1135,7 @@ long long get_output_size(struct img_type *img, bool strict)
 			return -ENOENT;
 		}
 
-		bytes = ustrtoull(output_size_str, NULL, 0);
+		bytes = ustrtoull(output_size_str, 0);
 		if (errno || bytes <= 0) {
 			ERROR("decompressed-size argument %s: ustrtoull failed",
 			      output_size_str);
@@ -1204,7 +1153,7 @@ long long get_output_size(struct img_type *img, bool strict)
 			return -ENOENT;
 		}
 
-		bytes = ustrtoull(output_size_str, NULL, 0);
+		bytes = ustrtoull(output_size_str, 0);
 		if (errno || bytes <= 0) {
 			ERROR("decrypted-size argument %s: ustrtoull failed",
 			      output_size_str);
@@ -1230,17 +1179,15 @@ static bool check_free_space(int fd, long long size, char *fname)
 #define fstatvfs fstatfs
 #endif
 	struct statvfs statvfs;
-	unsigned long long free_space;
 
 	if (fstatvfs(fd, &statvfs)) {
 		ERROR("Statfs failed on %s, skipping free space check", fname);
 		return true;
 	}
-	free_space = (unsigned long long)statvfs.f_bfree * statvfs.f_bsize;
 
-	if (free_space < size) {
+	if (statvfs.f_bfree * statvfs.f_bsize < size) {
 		ERROR("Not enough free space to extract %s (needed %llu, got %llu)",
-		       fname, size, free_space);
+		       fname, size, (unsigned long long)statvfs.f_bfree * statvfs.f_bsize);
 		return false;
 	}
 
@@ -1258,11 +1205,4 @@ bool img_check_free_space(struct img_type *img, int fd)
 		return true;
 
 	return check_free_space(fd, size, img->fname);
-}
-
-bool check_same_file(int fd1, int fd2) {
-    struct stat stat1, stat2;
-    if(fstat(fd1, &stat1) < 0) return false;
-    if(fstat(fd2, &stat2) < 0) return false;
-    return (stat1.st_dev == stat2.st_dev) && (stat1.st_ino == stat2.st_ino);
 }

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2017
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -12,7 +12,7 @@
 
 static struct dict environment;
 
-static int do_env_set(const char *name,
+int bootloader_env_set(const char *name,
 			const char  *value)
 {
 	dict_set_value(&environment, name, value);
@@ -20,14 +20,14 @@ static int do_env_set(const char *name,
 	return 0;
 }
 
-static int do_env_unset(const char *name)
+int bootloader_env_unset(const char *name)
 {
 	dict_remove(&environment, name);
 
 	return 0;
 }
 
-static char *do_env_get(const char  *name)
+char *bootloader_env_get(const char  *name)
 {
 	char *value = NULL, *var;
 
@@ -39,20 +39,7 @@ static char *do_env_get(const char  *name)
 	return value;
 }
 
-static int do_apply_list(const char *filename)
+int bootloader_apply_list(const char *filename)
 {
 	return dict_parse_script(&environment, filename);
-}
-
-static bootloader none = {
-	.env_get = &do_env_get,
-	.env_set = &do_env_set,
-	.env_unset = &do_env_unset,
-	.apply_list = &do_apply_list
-};
-
-__attribute__((constructor))
-static void none_probe(void)
-{
-	(void)register_bootloader(BOOTLOADER_NONE, &none);
 }

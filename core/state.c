@@ -23,7 +23,7 @@
  * environment/
  */
 #define CHECK_STATE_VAR(v) do { \
-	if (v[0] == 0) { \
+	if (strnlen(v, BOOTLOADER_VAR_LENGTH) == 0) { \
 		WARN("Update Status Storage Key " \
 			"is empty, setting it to 'ustate'"); \
 		v = (char *)"ustate"; \
@@ -51,7 +51,7 @@ int save_state(update_state_t value)
 		msg.magic = IPC_MAGIC;
 		msg.type = SET_UPDATE_STATE;
 		msg.data.msg[0] = (char)value;
-		return !(ipc_send_cmd(&msg) == 0 && msg.type == ACK);
+		return (ipc_send_cmd(&msg));
 	} else {
 		/* Main process */
 		return do_save_state((char *)STATE_KEY, value_str);

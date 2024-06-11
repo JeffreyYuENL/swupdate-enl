@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <stefano.babic@swupdate.org>
+.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <sbabic@denx.de>
 .. SPDX-License-Identifier: GPL-2.0-only
 
 ==================================
@@ -68,6 +68,7 @@ against it. To use it as replacement for u-boot-fw-utils:
 ::
 
                 CONFIG_UBOOT=y
+                CONFIG_UBOOT_NEWAPI=y
 
 With this library, you can simply pass the default environment as file (u-boot-initial-env).
 It is recommended for new project to switch to the new library to become independent from
@@ -125,7 +126,7 @@ generating the SWU. The class defines new variables, all of them have the prefix
   process using CMS mechanism. It is available if SWUPDATE_SIGNING is set to
   CMS.
 - **SWUPDATE_CMS_CERT** : this is the file with the certificate used in signing
-  process using CMS method. It is available if SWUPDATE_SIGNING is
+  process using using CMS method. It is available if SWUPDATE_SIGNING is
   set to CMS.
 
 - **SWUPDATE_AES_FILE** : this is the file with the AES password to encrypt artifact. A new `fstype` is
@@ -134,7 +135,7 @@ generating the SWU. The class defines new variables, all of them have the prefix
 
   ::
 
-                openssl enc -aes-256-cbc -k <PASSPHRASE> -P -md sha1 -nosalt > $SWUPDATE_AES_FILE
+                openssl enc -aes-256-cbc -k <PASSPHRASE> -P -md sha1 > $SWUPDATE_AES_FILE
 
   To use it, it is enough to add IMAGE_FSTYPES += "enc" to the  artifact. SWUpdate supports decryption of
   compressed artifact, such as
@@ -153,13 +154,13 @@ is signed. Each artifact must have the attribute:
 
 ::
 
-        sha256 = "$swupdate_get_sha256(artifact-file-name)"
+        sha256 = "@artifact-file-name"
 
 For example, to add sha256 to the standard Yocto core-image-full-cmdline:
 
 ::
 
-        sha256 = "$swupdate_get_sha256(core-image-full-cmdline-machine.ubifs)";
+        sha256 = "@core-image-full-cmdline-machine.ubifs";
 
 
 The name of the file must be the same as in deploy directory.
@@ -178,23 +179,47 @@ For example, to automatically set the version tag:
 Automatic versions in sw-description
 ------------------------------------
 
-By setting the version tag in the update file to `$swupdate_get_pkgvar(<package-name>)` it is
+By setting the version tag in the update file to `@SWU_AUTO_VERSION` it is
 automatically replaced with `PV` from BitBake's package-data-file for the package
-matching the name of the provided <package-name> tag.
+matching the name of the provided filename tag.
 For example, to set the version tag to `PV` of package `u-boot`:
 
 ::
 
-        version = "$swupdate_get_pkgvar(u-boot)";
+        filename = "u-boot";
+        ...
+        version = "@SWU_AUTO_VERSION";
+
+Since the filename can differ from package name (deployed with another name or
+the file is a container for the real package) you can append the correct package
+name to the tag: `@SWU_AUTO_VERSION:<package-name>`.
+For example, to set the version tag of the file `packed-bootloader` to `PV` of
+package `u-boot`:
+
+::
+
+        filename = "packed-bootloader";
+        ...
+        version = "@SWU_AUTO_VERSION:u-boot";
 
 To automatically insert the value of a variable from BitBake's package-data-file
 different to `PV` (e.g. `PKGV`) you can append the variable name to the tag:
-`$swupdate_get_pkgvar(<package-name>@<package-data-variable>)`
+`@SWU_AUTO_VERSION@<package-data-variable>`.
 For example, to set the version tag to `PKGV` of package `u-boot`:
 
 ::
 
-        version = "$swupdate_get_pkgvar(u-bootPKGV)";
+        filename = "u-boot";
+        ...
+        version = "@SWU_AUTO_VERSION@PKGV";
+
+Or combined with a different package name:
+
+::
+
+        filename = "packed-bootloader";
+        ...
+        version = "@SWU_AUTO_VERSION:u-boot@PKGV";
 
 Using checksum for version
 --------------------------
@@ -263,53 +288,3 @@ In the simple way, your recipe looks like
 
         SWUPDATE_IMAGES_FSTYPES[<name of your image>] = <fstype to be put into SWU>
         inherit swupdate-image
-
-What about grub ?
-=================
-In order to use swupdate with grub, swupdate needs to be configured to use grub. Some of
-the imporatant configurations are **CONFIG_GRUBENV_PATH="/path/to/grubenv"**,
-where **"/path/to/grubenv"** is thepath to grub environment.
-Example: "/boot/EFI/BOOT/grubenv".
-
-The grubenv file should be created using grub-editenv tool, because it is a **1024-byte file**, therefore,
-any modification using nano or vim will only corrupt the file, and grub will not be able to use it.
-
-You can create a grubenv file using these commands for instance:
-::
-
-        GRUBENV="/path/to/grubenv"
-        grub-editenv $GRUBENV create
-        grub-editenv $GRUBENV set rootfs=2
-        grub-editenv $GRUBENV set kernel=2
-
-grub-editenv is a tool that is integrated to yocto.
-
-When the grubenv file is created, grub should be configured to use it.
-This configuration should be in the configuration file grub.cfg.
-Here is an example of grub.cfg that loads the environment file before booting:
-::
-
-        # Take a kernel and a rootfs by default in case grubenv is corrupted
-        rootfs=1
-        kernel=1
-        serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1
-        default=boot
-        # set timeout to zero to boot without timeout
-        timeout=0
-        # load grubenv the environment file that contains the value of rootfs and kernel variables
-        load_env -f "/path/to/grubenv"
-        # detect which memory contains 5 partitions
-        for i in 1 2 3 4 5; do  if [ -d (hd${i},gpt5)/ ]; then drive=${i};fi ; done
-        # detect which rootfs should we boot with
-        if [ ${rootfs} = "1" ]; then rootfs_part=4 ; elif [ ${rootfs} = "2" ]; then rootfs_part=5 ; fi
-        # detect which kernel should we boot with
-        if [ ${kernel} = "1" ]; then kernel_part="(hd${drive},gpt2)" ; elif [ ${kernel} = "2" ]; then kernel_part="(hd${drive},gpt3)" ; fi
-
-        # The menuentry that is used to boot (more can be added if it is wanted)
-        menuentry 'boot'{
-        linux ${kernel_part}/bzImage root=/dev/mmcblk1p${rootfs_part} rw rootwait quiet console=ttyS2,115200 console=tty0 panic=5
-        }
-
-The grub.cfg above is merely an example, and can be modified as the user wants to,
-as long as it loads the environment variables,and it boots correctly using these environment
-variables. 

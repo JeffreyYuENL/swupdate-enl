@@ -1,6 +1,7 @@
 /*
- * (C) Copyright 2013-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2013
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -11,7 +12,7 @@
 #include <stdlib.h>
 #include <errno.h>
 
-#include "swupdate_image.h"
+#include "swupdate.h"
 #include "handler.h"
 #include "util.h"
 

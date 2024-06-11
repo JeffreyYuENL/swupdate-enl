@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2019
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -16,7 +16,7 @@
 #include <stddef.h>
 
 #include <mtd/mtd-user.h>
-#include "swupdate_image.h"
+#include "swupdate.h"
 #include "handler.h"
 #include "util.h"
 #include "flash.h"
@@ -166,7 +166,7 @@ static int inline get_active_ssbl(struct ssbl_priv *padmins) {
 
 static int ssbl_swap(struct img_type *img, void *data)
 {
-	struct script_handler_data *script_data;
+	script_fn scriptfn;
 	struct ssbl_priv admins[2];
 	struct ssbl_priv *pssbl;
 	struct proplist *entry;
@@ -178,12 +178,12 @@ static int ssbl_swap(struct img_type *img, void *data)
 	if (!data)
 		return -EINVAL;
 
-	script_data = data;
+	scriptfn = *(script_fn *)data;
 
 	/*
 	 * Call only in case of postinstall
 	 */
-	if (script_data->scriptfn != POSTINSTALL)
+	if (scriptfn != POSTINSTALL)
 		return 0;
 
 	memset(admins, 0, 2 * sizeof(struct ssbl_priv));

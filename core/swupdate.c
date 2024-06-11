@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2012-2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -39,7 +39,6 @@
 #include "mongoose_interface.h"
 #include "download_interface.h"
 #include "network_ipc.h"
-#include "network_utils.h"
 #include "sslapi.h"
 #include "suricatta/suricatta.h"
 #include "delta_process.h"
@@ -49,9 +48,6 @@
 #include "pctl.h"
 #include "state.h"
 #include "bootloader.h"
-#include "versions.h"
-#include "hw-compatibility.h"
-#include "swupdate_vars.h"
 
 #ifdef CONFIG_SYSTEMD
 #include <systemd/sd-daemon.h>
@@ -63,9 +59,6 @@ static pthread_t network_daemon;
 
 /* Tree derived from the configuration file */
 static struct swupdate_cfg swcfg;
-
-int loglevel = ERRORLEVEL;
-int exit_code = EXIT_SUCCESS;
 
 #ifdef CONFIG_MTD
 /* Global MTD configuration */
@@ -97,9 +90,7 @@ static struct option long_options[] = {
 	{"key", required_argument, NULL, 'k'},
 	{"ca-path", required_argument, NULL, 'k'},
 	{"cert-purpose", required_argument, NULL, '1'},
-#if defined(CONFIG_SIGALG_CMS) && !defined(CONFIG_SSL_IMPL_WOLFSSL)
 	{"forced-signer-name", required_argument, NULL, '2'},
-#endif
 #endif
 #ifdef CONFIG_ENCRYPTED_IMAGES
 	{"key-aes", required_argument, NULL, 'K'},
@@ -111,7 +102,6 @@ static struct option long_options[] = {
 	{"no-state-marker", no_argument, NULL, 'm'},
 	{"no-transaction-marker", no_argument, NULL, 'M'},
 	{"output", required_argument, NULL, 'o'},
-	{"gen-swversions", required_argument, NULL, 's'},
 	{"preupdate", required_argument, NULL, 'P'},
 	{"postupdate", required_argument, NULL, 'p'},
 	{"select", required_argument, NULL, 'e'},
@@ -124,9 +114,10 @@ static struct option long_options[] = {
 #ifdef CONFIG_WEBSERVER
 	{"webserver", required_argument, NULL, 'w'},
 #endif
-	{"bootloader", required_argument, NULL, 'B'},
 	{NULL, 0, NULL, 0}
 };
+
+int loglevel = ERRORLEVEL;
 
 static void usage(char *programname)
 {
@@ -138,13 +129,11 @@ static void usage(char *programname)
 #ifdef CONFIG_UBIATTACH
 		" -b, --blacklist <list of mtd>  : MTDs that must not be scanned for UBI\n"
 #endif
-		" -B, --bootloader               : bootloader interface (default: " PREPROCVALUE(BOOTLOADER_DEFAULT) ")\n"
 		" -p, --postupdate               : execute post-update command\n"
 		" -P, --preupdate                : execute pre-update command\n"
 		" -e, --select <software>,<mode> : Select software images set and source\n"
 		"                                  Ex.: stable,main\n"
-		" -g, --get-root                 : detect and print the root device and exit\n" 
-		" -q, --accepted-select\n"
+		" --accepted-select\n"
 		"            <software>,<mode>   : List for software images set and source\n"
 		"                                  that are accepted via IPC\n"
 		"                                  Ex.: stable,main\n"
@@ -153,15 +142,11 @@ static void usage(char *programname)
 		" -l, --loglevel <level>         : logging level\n"
 		" -L, --syslog                   : enable syslog logger\n"
 #ifdef CONFIG_SIGNED_IMAGES
-#ifndef CONFIG_SIGALG_GPG
 		" -k, --key <public key file>    : file with public key to verify images\n"
 		"     --cert-purpose <purpose>   : set expected certificate purpose\n"
 		"                                  [emailProtection|codeSigning] (default: emailProtection)\n"
-#if defined(CONFIG_SIGALG_CMS) && !defined(CONFIG_SSL_IMPL_WOLFSSL)
 		"     --forced-signer-name <cn>  : set expected common name of signer certificate\n"
-#endif
 		"     --ca-path                  : path to the Certificate Authority (PEM)\n"
-#endif
 #endif
 #ifdef CONFIG_ENCRYPTED_IMAGES
 		" -K, --key-aes <key file>       : the file contains the symmetric key to be used\n"
@@ -174,7 +159,6 @@ static void usage(char *programname)
 		" -M, --no-transaction-marker    : disable setting bootloader transaction marker\n"
 		" -m, --no-state-marker          : disable setting update state in bootloader\n"
 		" -o, --output <filename>        : saves the incoming stream\n"
-		" -s, --gen-swversions <filename>: generate sw-versions file after successful installation\n"
 		" -v, --verbose                  : be verbose, set maximum loglevel\n"
 		"     --version                  : print SWUpdate version and exit\n"
 #ifdef CONFIG_HW_COMPATIBILITY
@@ -300,15 +284,6 @@ static int read_globals_settings(void *elem, void *data)
 	struct swupdate_cfg *sw = (struct swupdate_cfg *)data;
 
 	GET_FIELD_STRING(LIBCFG_PARSER, elem,
-				"bootloader", tmp);
-	if (tmp[0] != '\0') {
-		if (set_bootloader(tmp) != 0) {
-			ERROR("Bootloader interface '%s' could not be initialized.", tmp);
-			exit(EXIT_FAILURE);
-		}
-		tmp[0] = '\0';
-	}
-	GET_FIELD_STRING(LIBCFG_PARSER, elem,
 				"public-key-file", sw->publickeyfname);
 	GET_FIELD_STRING(LIBCFG_PARSER, elem,
 				"ca-path", sw->publickeyfname);
@@ -320,27 +295,11 @@ static int read_globals_settings(void *elem, void *data)
 				"postupdatecmd", sw->postupdatecmd);
 	GET_FIELD_STRING(LIBCFG_PARSER, elem,
 				"preupdatecmd", sw->preupdatecmd);
-	GET_FIELD_STRING(LIBCFG_PARSER, elem,
-				"namespace-vars", sw->namespace_for_vars);
-	GET_FIELD_STRING(LIBCFG_PARSER, elem,
-				"gen-swversions", sw->output_swversions);
-	if (strlen(sw->namespace_for_vars)) {
-		if (!swupdate_set_default_namespace(sw->namespace_for_vars))
-			WARN("Default Namaspace for SWUpdate vars cannot be set, possible side-effects");
-	}
-
-	GET_FIELD_BOOL(LIBCFG_PARSER, elem, "verbose", &sw->verbose);
-	GET_FIELD_INT(LIBCFG_PARSER, elem, "loglevel", &sw->loglevel);
-	GET_FIELD_BOOL(LIBCFG_PARSER, elem, "syslog", &sw->syslog_enabled);
+	get_field(LIBCFG_PARSER, elem, "verbose", &sw->verbose);
+	get_field(LIBCFG_PARSER, elem, "loglevel", &sw->loglevel);
+	get_field(LIBCFG_PARSER, elem, "syslog", &sw->syslog_enabled);
 	GET_FIELD_STRING(LIBCFG_PARSER, elem,
 				"no-downgrading", sw->minimum_version);
-	tmp[0] = '\0';
-	GET_FIELD_STRING(LIBCFG_PARSER, elem,
-				"fwenv-config-location", tmp);
-	if (strlen(tmp)) {
-		set_fwenv_config(tmp);
-		tmp[0] = '\0';
-	}
 	if (strlen(sw->minimum_version))
 		sw->no_downgrading = true;
 	GET_FIELD_STRING(LIBCFG_PARSER, elem,
@@ -360,10 +319,6 @@ static int read_globals_settings(void *elem, void *data)
 
 	char software_select[SWUPDATE_GENERAL_STRING_SIZE] = "";
 	GET_FIELD_STRING(LIBCFG_PARSER, elem, "select", software_select);
-	GET_FIELD_STRING(LIBCFG_PARSER, elem,
-				"gpg-home-dir", sw->gpg_home_directory);
-	GET_FIELD_STRING(LIBCFG_PARSER, elem,
-				"gpgme-protocol", sw->gpgme_protocol);
 	if (software_select[0] != '\0') {
 		/* by convention, errors in a configuration section are ignored */
 		(void)parse_image_selector(software_select, sw);
@@ -455,6 +410,7 @@ int main(int argc, char **argv)
 	char main_options[256];
 	unsigned int public_key_mandatory = 0;
 	struct sigaction sa;
+	int result = EXIT_SUCCESS;
 #ifdef CONFIG_SURICATTA
 	int opt_u = 0;
 	char *suricattaoptions;
@@ -479,7 +435,7 @@ int main(int argc, char **argv)
 #endif
 	memset(main_options, 0, sizeof(main_options));
 	memset(image_url, 0, sizeof(image_url));
-	strcpy(main_options, "vhni:e:gq:l:Lcf:p:P:o:s:N:R:MmB:");
+	strcpy(main_options, "vhni:e:gq:l:Lcf:p:P:o:N:R:Mm");
 #ifdef CONFIG_MTD
 	strcat(main_options, "b:");
 #endif
@@ -496,10 +452,8 @@ int main(int argc, char **argv)
 	strcat(main_options, "H:");
 #endif
 #ifdef CONFIG_SIGNED_IMAGES
-#ifndef CONFIG_SIGALG_GPG
 	strcat(main_options, "k:");
 	public_key_mandatory = 1;
-#endif
 #endif
 #ifdef CONFIG_ENCRYPTED_IMAGES
 	strcat(main_options, "K:");
@@ -540,7 +494,7 @@ int main(int argc, char **argv)
 			loglevel = strtoul(optarg, NULL, 10);
 			break;
 		case 'v':
-			loglevel = LASTLOGLEVEL;
+			loglevel = TRACELEVEL;
 			break;
 		case '0':
 			printf("%s", BANNER);
@@ -582,7 +536,7 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 
-		loglevel = swcfg.verbose ? LASTLOGLEVEL : swcfg.loglevel;
+		loglevel = swcfg.verbose ? TRACELEVEL : swcfg.loglevel;
 
 		/*
 		 * The following sections are optional, hence -ENODATA error code is
@@ -613,7 +567,7 @@ int main(int argc, char **argv)
 		}
 		switch (c) {
 		case 'v':
-			loglevel = LASTLOGLEVEL;
+			loglevel = TRACELEVEL;
 			break;
 #ifdef CONFIG_UBIATTACH
 		case 'b':
@@ -626,16 +580,6 @@ int main(int argc, char **argv)
 			break;
 		case 'o':
 			strlcpy(swcfg.output, optarg, sizeof(swcfg.output));
-			break;
-		case 's':
-			strlcpy(swcfg.output_swversions, optarg, sizeof(swcfg.output_swversions));
-			break;
-		case 'B':
-			if (set_bootloader(optarg) != 0) {
-				ERROR("Bootloader interface '%s' could not be initialized.", optarg);
-				print_registered_bootloaders();
-				exit(EXIT_FAILURE);
-			}
 			break;
 		case 'l':
 			loglevel = strtoul(optarg, NULL, 10);
@@ -777,19 +721,6 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-#ifdef CONFIG_SIGALG_GPG
-	if (!strlen(swcfg.gpg_home_directory)) {
-		fprintf(stderr,
-			 "Error: SWUpdate is built for signed images, provide a GnuPG home directory.\n");
-		exit(EXIT_FAILURE);
-	}
-	if (!strlen(swcfg.gpgme_protocol)) {
-		fprintf(stderr,
-			"Error: SWUpdate is built for signed images, please specify GnuPG protocol.\n");
-		exit(EXIT_FAILURE);
-	}
-#endif
-
 	if (opt_c && !opt_i) {
 		fprintf(stderr,
 			"Error: Checking local images requires -i <file>.\n");
@@ -811,7 +742,7 @@ int main(int argc, char **argv)
 
 	swupdate_crypto_init();
 
-	if (strlen(swcfg.publickeyfname) || strlen(swcfg.gpg_home_directory)) {
+	if (strlen(swcfg.publickeyfname)) {
 		if (swupdate_dgst_init(&swcfg, swcfg.publickeyfname)) {
 			fprintf(stderr,
 				 "Error: Crypto cannot be initialized.\n");
@@ -822,20 +753,6 @@ int main(int argc, char **argv)
 	printf("%s\n", BANNER);
 	printf("Licensed under GPLv2. See source distribution for detailed "
 		"copyright notices.\n\n");
-
-	print_registered_bootloaders();
-	if (!get_bootloader()) {
-		if (set_bootloader(PREPROCVALUE(BOOTLOADER_DEFAULT)) != 0) {
-			ERROR("Default bootloader interface '" PREPROCVALUE(
-			    BOOTLOADER_DEFAULT) "' couldn't be loaded.");
-			INFO("Check that the bootloader interface shared library is present.");
-			INFO("Or chose another bootloader interface by supplying -B <loader>.");
-			exit(EXIT_FAILURE);
-		}
-		INFO("Using default bootloader interface: " PREPROCVALUE(BOOTLOADER_DEFAULT));
-	} else {
-		INFO("Using bootloader interface: %s", get_bootloader());
-	}
 
 	/*
 	 * Install a child handler to check if a subprocess
@@ -861,7 +778,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	lua_handlers_init(NULL);
+	lua_handlers_init();
 
 	if(!get_hw_revision(&swcfg.hw))
 		INFO("Running on %s Revision %s", swcfg.hw.boardname, swcfg.hw.revision);
@@ -893,9 +810,6 @@ int main(int argc, char **argv)
 	 *  Start daemon if just a check is required
 	 *  SWUpdate will exit after the check
 	 */
-	if(init_socket_unlink_handler() != 0){
-		TRACE("Cannot setup socket cleanup on exit, sockets won't be unlinked.");
-	}
 	network_daemon = start_thread(network_initializer, &swcfg);
 
 	start_thread(progress_bar_thread, NULL);
@@ -936,7 +850,7 @@ int main(int argc, char **argv)
 		read_settings_user_id(&handle, "download", &uid, &gid);
 		start_subprocess(SOURCE_DOWNLOADER, "download", uid, gid,
 				 cfgfname, dwlac,
-				 dwlav, start_download_server);
+				 dwlav, start_download);
 		freeargs(dwlav);
 	}
 #endif
@@ -946,7 +860,7 @@ int main(int argc, char **argv)
 		gid_t gid;
 		read_settings_user_id(&handle, "download", &uid, &gid);
 		start_subprocess(SOURCE_CHUNKS_DOWNLOADER, "chunks_downloader", uid, gid,
-				cfgfname, 0, NULL,
+				cfgfname, ac, av,
 				start_delta_downloader);
 	}
 #endif
@@ -973,11 +887,14 @@ int main(int argc, char **argv)
 	}
 
 	if (opt_i) {
-		exit_code = install_from_file(fname, opt_c);
+		result = install_from_file(fname, opt_c);
+		cleanup_files(&swcfg);
 	}
 
 #ifdef CONFIG_SYSTEMD
-	sd_notify(0, "READY=1");
+	if (sd_booted()) {
+		sd_notify(0, "READY=1");
+	}
 #endif
 
 	/*
@@ -997,5 +914,5 @@ int main(int argc, char **argv)
 	if (!opt_c && !opt_i)
 		pthread_join(network_daemon, NULL);
 
-	return exit_code;
+	return result;
 }

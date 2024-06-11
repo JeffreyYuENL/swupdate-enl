@@ -1,14 +1,14 @@
 /*
  * (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
 
-#pragma once
+#ifndef _SWUPDATE_SSL_H
+#define _SWUPDATE_SSL_H
 
 #include <stdint.h>
-#include "util.h"
 
 #define SHA_DEFAULT	"sha256"
 
@@ -20,7 +20,6 @@
 
 #ifdef CONFIG_PKCS11
 #include <wolfssl/options.h>
-#include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/wc_pkcs11.h>
 // Exclude p11-kit's pkcs11.h to prevent conflicting with wolfssl's
@@ -39,9 +38,7 @@
 #include <openssl/hmac.h>
 #include <openssl/aes.h>
 #include <openssl/opensslv.h>
-#include <openssl/cms.h>
 #elif defined(CONFIG_SSL_IMPL_WOLFSSL)
-#include <wolfssl/ssl.h>
 #include <wolfssl/options.h>
 #include <wolfssl/openssl/bio.h>
 #include <wolfssl/openssl/objects.h>
@@ -53,16 +50,19 @@
 #include <wolfssl/openssl/hmac.h>
 #include <wolfssl/openssl/aes.h>
 #include <wolfssl/openssl/opensslv.h>
-#include <wolfssl/openssl/pkcs7.h>
 #endif
 
 #if defined(CONFIG_SSL_IMPL_OPENSSL) || defined(CONFIG_SSL_IMPL_WOLFSSL)
 
 #ifdef CONFIG_SIGALG_CMS
+#if defined(LIBRESSL_VERSION_NUMBER)
+#error "LibreSSL does not support CMS, please select RSA PKCS"
+#else
+#include <openssl/cms.h>
 
 static inline uint32_t SSL_X509_get_extension_flags(X509 *x)
 {
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 	return x->ex_flags;
 #else
 	return X509_get_extension_flags(x);
@@ -71,13 +71,14 @@ static inline uint32_t SSL_X509_get_extension_flags(X509 *x)
 
 static inline uint32_t SSL_X509_get_extended_key_usage(X509 *x)
 {
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 	return x->ex_xkusage;
 #else
 	return X509_get_extended_key_usage(x);
 #endif
 }
 
+#endif
 #endif /* CONFIG_SIGALG_CMS */
 
 #ifdef CONFIG_SSL_IMPL_WOLFSSL
@@ -86,9 +87,7 @@ static inline uint32_t SSL_X509_get_extended_key_usage(X509 *x)
 #define X509_PURPOSE_CODE_SIGN EXTKEYUSE_CODESIGN
 #define SSL_PURPOSE_EMAIL_PROT EXTKEYUSE_EMAILPROT
 #else
-#if !defined(X509_PURPOSE_CODE_SIGN)
 #define X509_PURPOSE_CODE_SIGN (X509_PURPOSE_MAX + 1)
-#endif
 #define SSL_PURPOSE_EMAIL_PROT X509_PURPOSE_SMIME_SIGN
 #endif
 #define SSL_PURPOSE_CODE_SIGN  X509_PURPOSE_CODE_SIGN
@@ -105,19 +104,14 @@ struct swupdate_digest {
 	Aes ctxdec;
 	Pkcs11Dev pkdev;
 	Pkcs11Token pktoken;
-#elif OPENSSL_VERSION_NUMBER < 0x10100000L
+#elif OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 	EVP_CIPHER_CTX ctxdec;
 #else
 	EVP_CIPHER_CTX *ctxdec;
 #endif
-#ifdef CONFIG_SIGALG_GPG
-	char *gpg_home_directory;
-	bool verbose;
-	char *gpgme_protocol;
-#endif
 };
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 #define SSL_GET_CTXDEC(dgst) &dgst->ctxdec
 #else
 #define SSL_GET_CTXDEC(dgst) dgst->ctxdec
@@ -128,7 +122,7 @@ struct swupdate_digest {
  * library
  * It must be called just once
  */
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 #define swupdate_crypto_init() { \
 	do { \
 		CRYPTO_malloc_init(); \
@@ -164,11 +158,6 @@ struct swupdate_digest {
 #elif defined(CONFIG_ENCRYPTED_IMAGES)
 	mbedtls_cipher_context_t mbedtls_cipher_context;
 #endif /* CONFIG_PKCS11 */
-#ifdef CONFIG_SIGALG_GPG
-	char *gpg_home_directory;
-	int verbose;
-	char *gpgme_protocol;
-#endif
 };
 
 #else /* CONFIG_SSL_IMPL */
@@ -211,14 +200,11 @@ int swupdate_DECRYPT_final(struct swupdate_digest *dgst, unsigned char *buf,
 				int *outlen);
 void swupdate_DECRYPT_cleanup(struct swupdate_digest *dgst);
 #else
-UNUSED static inline struct swupdate_digest *swupdate_DECRYPT_init(
-		unsigned char UNUSED *key,
-		char UNUSED keylen,
-		unsigned char UNUSED *iv)
-{
-	ERROR("SWUpdate was built without support for encrypted images");
-	return NULL;
-}
+/*
+ * Note: macro for swupdate_DECRYPT_init is
+ * just to avoid compiler warnings
+ */
+#define swupdate_DECRYPT_init(key, keylen, iv) (((key != NULL) | (ivt != NULL)) ? NULL : NULL)
 #define swupdate_DECRYPT_update(p, buf, len, cbuf, inlen) (-1)
 #define swupdate_DECRYPT_final(p, buf, len) (-1)
 #define swupdate_DECRYPT_cleanup(p)
@@ -229,3 +215,6 @@ UNUSED static inline struct swupdate_digest *swupdate_DECRYPT_init(
 #define SSL_PURPOSE_CODE_SIGN  -1
 #define SSL_PURPOSE_DEFAULT -1
 #endif
+
+#endif
+

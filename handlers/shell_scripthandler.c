@@ -1,6 +1,7 @@
 /*
- * (C) Copyright 2014-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2014
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -15,8 +16,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include "swupdate.h"
 #include "handler.h"
-#include "swupdate_image.h"
 #include "util.h"
 #include "pctl.h"
 
@@ -49,22 +50,19 @@ static int execute_shell_script(struct img_type *img, const char *fnname)
 static int start_shell_script(struct img_type *img, void *data)
 {
 	const char *fnname;
-	struct script_handler_data *script_data;
+	script_fn scriptfn;
 
 	if (!data)
 		return -EINVAL;
 
-	script_data = data;
+	scriptfn = *(script_fn *)data;
 
-	switch (script_data->scriptfn) {
+	switch (scriptfn) {
 	case PREINSTALL:
 		fnname="preinst";
 		break;
 	case POSTINSTALL:
 		fnname="postinst";
-		break;
-	case POSTFAILURE:
-		fnname="failure";
 		break;
 	default:
 		/* no error, simply no call */
@@ -76,17 +74,17 @@ static int start_shell_script(struct img_type *img, void *data)
 
 static int start_preinstall_script(struct img_type *img, void *data)
 {
-	struct script_handler_data *script_data;
+	script_fn scriptfn;
 
 	if (!data)
 		return -EINVAL;
 
-	script_data = data;
+	scriptfn = *(script_fn *)data;
 
 	/*
 	 * Call only in case of preinstall
 	 */
-	if (script_data->scriptfn != PREINSTALL)
+	if (scriptfn != PREINSTALL)
 		return 0;
 
 	return execute_shell_script(img, "");
@@ -94,17 +92,17 @@ static int start_preinstall_script(struct img_type *img, void *data)
 
 static int start_postinstall_script(struct img_type *img, void *data)
 {
-	struct script_handler_data *script_data;
+	script_fn scriptfn;
 
 	if (!data)
 		return -EINVAL;
 
-	script_data = data;
+	scriptfn = *(script_fn *)data;
 
 	/*
 	 * Call only in case of postinstall
 	 */
-	if (script_data->scriptfn != POSTINSTALL)
+	if (scriptfn != POSTINSTALL)
 		return 0;
 
 	return execute_shell_script(img, "");

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -15,9 +15,9 @@
 #include <string.h>
 #include <zmq.h>
 
-#include "handler.h"
-#include "util.h"
-#include "swupdate_image.h"
+#include <swupdate.h>
+#include <handler.h>
+#include <util.h>
 
 #define MSG_FRAMES	2
 #define FRAME_CMD	0
@@ -48,10 +48,7 @@ static void RHset_payload(struct RHmsg *self, const void *body, size_t size)
 {
     zmq_msg_t *msg = &self->frame[FRAME_BODY];
     zmq_msg_init_size(msg, size);
-    if ((body != NULL) && (size > 0))
-    {
-        memcpy (zmq_msg_data(msg), body, size);
-    }
+    memcpy (zmq_msg_data(msg), body, size);
 }
 
 static int RHmsg_send_cmd(struct RHmsg *self, void *request)
@@ -132,7 +129,7 @@ static int RHmsg_get_ack(struct RHmsg *self, void *request)
 	return 0;
 }
 
-static int forward_data(void *request, const void *buf, size_t len)
+static int forward_data(void *request, const void *buf, unsigned int len)
 {
 	struct RHmsg RHmessage;
 	int ret;

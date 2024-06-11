@@ -6,7 +6,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#pragma once
+#ifndef __SEMVER_H
+#define __SEMVER_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,4 +101,6 @@ semver_clean (char *s);
 
 #ifdef __cplusplus
 }
+#endif
+
 #endif

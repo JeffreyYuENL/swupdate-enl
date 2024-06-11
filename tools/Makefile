@@ -1,6 +1,6 @@
 # Makefile for swupdate
 #
-# Copyright (C) 2013 Stefano Babic <stefano.babic@swupdate.org>
+# Copyright (C) 2013 Stefano Babic <sbabic@denx.de>
 #
 # Based on busybox build system:
 #

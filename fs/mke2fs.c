@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Stefano Babic, stefano.babic@swupdate.org
+ * Copyright (C) 2021 Stefano Babic, sbabic@denx.de
  *
  * The code is mostly taken and modified from
  * mke2fs.c - Make a ext2fs filesystem.
@@ -948,7 +948,7 @@ int ext_mkfs(const char *device_name, const char *fstype, unsigned long features
 	if (volume_label) {
 		memset(fs->super->s_volume_name, 0,
 		       sizeof(fs->super->s_volume_name));
-		strncpy((char *)fs->super->s_volume_name, volume_label,
+		strncpy(fs->super->s_volume_name, volume_label,
 			sizeof(fs->super->s_volume_name) - 1);
 	}
 

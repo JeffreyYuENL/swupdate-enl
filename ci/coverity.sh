@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) Stefano Babic <stefano.babic@swupdate.org>
+# Copyright (c) Stefano Babic <sbabic@denx.de>
 #
 # SPDX-License-Identifier:	GPL-2.0-only
 

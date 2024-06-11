@@ -24,7 +24,7 @@ install_mtd_utils() {
     git checkout -b tmp v2.0.0
     ./autogen.sh
     ./configure
-    make -j$(nproc)
+    make
     $_SUDO install -m 644 include/libubi.h /usr/local/include
     $_SUDO install -m 644 include/libmtd.h /usr/local/include
     $_SUDO install -m 644 include/mtd/ubi-media.h /usr/local/include/mtd
@@ -36,7 +36,7 @@ install_libubootenv() {
     git clone https://github.com/sbabic/libubootenv.git
     cd libubootenv
     cmake .
-    make -j$(nproc)
+    make
     $_SUDO make install
     cd ..
 }
@@ -44,11 +44,12 @@ install_libubootenv() {
 install_efibootguard() {
     git clone https://github.com/siemens/efibootguard.git
     cd efibootguard
-    git submodule update --init
     autoreconf -fi
-    ./configure --disable-bootloader
-    make -j$(nproc)
-    $_SUDO make install
+    ./configure
+    make libebgenv.a
+    $_SUDO install -m 644 libebgenv.a /usr/local/lib/libebgenv.a
+    $_SUDO install -m 755 -d /usr/include/efibootguard
+    $_SUDO install -m 644 include/ebgenv.h /usr/include/efibootguard/ebgenv.h
     cd ..
 }
 

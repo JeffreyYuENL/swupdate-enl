@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2019
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -38,7 +38,6 @@ static int read_file_into_buffer(uint8_t *buffer, int size, const char *filename
 	result = 0;
 
 exit:
-	close(fd);
 	return result;
 }
 

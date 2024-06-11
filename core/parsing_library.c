@@ -1,5 +1,5 @@
 /* (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -17,8 +17,8 @@
 #include "generated/autoconf.h"
 #include "bsdqueue.h"
 #include "util.h"
+#include "swupdate.h"
 #include "parselib.h"
-#include "parselib-private.h"
 
 #define MAX_LINKS_DEPTH	10
 
@@ -121,27 +121,13 @@ void get_field_string_with_size(parsertype p, void *e, const char *path, char *d
 	}
 }
 
-bool is_field_numeric(parsertype p, void *e, const char *path)
+void get_field(parsertype p, void *e, const char *path, void *dest)
 {
 	switch (p) {
 	case LIBCFG_PARSER:
-		return is_field_numeric_cfg((config_setting_t *)e, path);
+		return get_field_cfg((config_setting_t *)e, path, dest);
 	case JSON_PARSER:
-		return is_field_numeric_json((json_object *)e, path);
-	default:
-		(void)e;
-		(void)path;
-	}
-	return false;
-}
-
-void get_field(parsertype p, void *e, const char *path, void *dest, field_type_t type)
-{
-	switch (p) {
-	case LIBCFG_PARSER:
-		return get_field_cfg((config_setting_t *)e, path, dest, type);
-	case JSON_PARSER:
-		return get_field_json((json_object *)e, path, dest, type);
+		return get_field_json((json_object *)e, path, dest);
 	default:
 		(void)e;
 		(void)path;

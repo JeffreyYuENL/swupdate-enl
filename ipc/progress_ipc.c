@@ -26,14 +26,11 @@ char *SOCKET_PROGRESS_PATH = NULL;
 
 char *get_prog_socket(void) {
 	if (!SOCKET_PROGRESS_PATH || !strlen(SOCKET_PROGRESS_PATH)) {
-		const char *socketdir = getenv("RUNTIME_DIRECTORY");
-		if(!socketdir){
-			socketdir = getenv("TMPDIR");
-		}
-		if(!socketdir){
-			socketdir = "/tmp";
-		}
-		if (asprintf(&SOCKET_PROGRESS_PATH, "%s/%s", socketdir, SOCKET_PROGRESS_DEFAULT) == -1)
+		const char *tmpdir = getenv("TMPDIR");
+		if (!tmpdir)
+			tmpdir = "/tmp";
+
+		if (asprintf(&SOCKET_PROGRESS_PATH, "%s/%s", tmpdir, SOCKET_PROGRESS_DEFAULT) == -1)
 			return (char *)"/tmp/"SOCKET_PROGRESS_DEFAULT;
 	}
 
@@ -67,6 +64,7 @@ static int _progress_ipc_connect(const char *socketpath, bool reconnect)
 		usleep(10000);
 	} while (true);
 
+	fprintf(stdout, "Connected to SWUpdate via %s\n", socketpath);
 	return fd;
 }
 
@@ -85,14 +83,8 @@ int progress_ipc_receive(int *connfd, struct progress_msg *msg) {
 	if (ret == -1 && (errno == EAGAIN || errno == EINTR))
 		return 0;
 
-	/*
-	 * size of message can vary if the API version does not match
-	 * First check it to return a correct error, else it always
-	 * return -1.
-	 */
-	if (ret > sizeof(msg->apiversion) && (msg->apiversion != PROGRESS_API_VERSION))
-		return -EBADMSG;
 	if (ret != sizeof(*msg)) {
+		fprintf(stdout, "Connection closing..\n");
 		close(*connfd);
 		*connfd = -1;
 		return -1;

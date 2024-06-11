@@ -3,7 +3,8 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#pragma once
+#ifndef _multipart_parser_h
+#define _multipart_parser_h
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,4 +45,5 @@ void *multipart_parser_get_data(multipart_parser * p);
 
 #ifdef __cplusplus
 }				/* extern "C" */
+#endif
 #endif

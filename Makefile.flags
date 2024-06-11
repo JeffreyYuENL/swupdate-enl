@@ -5,8 +5,8 @@
 # ==========================================================================
 # Build system
 # ==========================================================================
-SWU_DIR = $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
-SWU_VER = $(shell git -C $(SWU_DIR) describe --tags --always --dirty)
+
+SWU_VER = $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION)
 export SWU_VER
 SKIP_STRIP ?= n
 
@@ -209,49 +209,16 @@ ifeq ($(CONFIG_UCFWHANDLER),y)
 LDLIBS += gpiod
 endif
 
-
-ifeq ($(CONFIG_BOOTLOADER_STATIC_LINKED),y)
 ifeq ($(CONFIG_UBOOT),y)
-LDLIBS += ubootenv
-endif
-ifeq ($(CONFIG_BOOTLOADER_EBG),y)
-LDLIBS += ebgenv
-endif
-else
-ifeq ($(CONFIG_UBOOT),y)
-LDLIBS += dl
-endif
-ifeq ($(CONFIG_BOOTLOADER_EBG),y)
-LDLIBS += dl
-endif
+LDLIBS += z ubootenv
 endif
 
 ifeq ($(CONFIG_SYSTEMD),y)
 LDLIBS += systemd
 endif
 
-ifeq ($(CONFIG_BOOTLOADER_DEFAULT_NONE),y)
-KBUILD_CPPFLAGS += -DBOOTLOADER_DEFAULT="none"
-else ifeq ($(CONFIG_BOOTLOADER_DEFAULT_GRUB),y)
-KBUILD_CPPFLAGS += -DBOOTLOADER_DEFAULT="grub"
-else ifeq ($(CONFIG_BOOTLOADER_DEFAULT_UBOOT),y)
-KBUILD_CPPFLAGS += -DBOOTLOADER_DEFAULT="uboot"
-else ifeq ($(CONFIG_BOOTLOADER_DEFAULT_EBG),y)
-KBUILD_CPPFLAGS += -DBOOTLOADER_DEFAULT="ebg"
-else
-KBUILD_CPPFLAGS += -DBOOTLOADER_DEFAULT="none"
-endif
-
-ifneq ($(CONFIG_SURICATTA),)
-ifneq ($(CONFIG_SURICATTA_LUA),)
-ifneq ($(CONFIG_EMBEDDED_SURICATTA_LUA),)
-ifneq ($(CONFIG_EMBEDDED_SURICATTA_LUA_SOURCE),)
-LDFLAGS_swupdate += -Wl,--format=binary -Wl,$(CONFIG_EMBEDDED_SURICATTA_LUA_SOURCE) -Wl,--format=default
-KBUILD_CPPFLAGS += -DEMBEDDED_SURICATTA_LUA_SOURCE_START="_binary_$(subst ",,$(subst .,_,$(subst /,_,$(CONFIG_EMBEDDED_SURICATTA_LUA_SOURCE))))_start"
-KBUILD_CPPFLAGS += -DEMBEDDED_SURICATTA_LUA_SOURCE_END="_binary_$(subst ",,$(subst .,_,$(subst /,_,$(CONFIG_EMBEDDED_SURICATTA_LUA_SOURCE))))_end"	
-endif
-endif
-endif
+ifeq ($(CONFIG_BOOTLOADER_EBG),y)
+LDLIBS += ebgenv z
 endif
 
 # SWU forwarder

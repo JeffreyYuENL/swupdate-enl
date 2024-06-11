@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2018
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -25,19 +25,29 @@
 #include <sys/time.h>
 #include <swupdate_status.h>
 #include "suricatta/suricatta.h"
-#include "suricatta/server.h"
-#include "server_utils.h"
+#include "suricatta_private.h"
 #include "parselib.h"
 #include "channel.h"
 #include <curl/curl.h>
 #include "channel_curl.h"
 #include "state.h"
+#include "parselib.h"
 #include "swupdate_settings.h"
 #include "swupdate_dict.h"
 #include "server_general.h"
 #include <progress_ipc.h>
 #include <pctl.h>
 #include <pthread.h>
+
+/* Prototypes for "public" functions */
+void server_print_help(void);
+server_op_res_t server_has_pending_action(int *action_id);
+server_op_res_t server_stop(void);
+server_op_res_t server_ipc(ipc_message *msg);
+server_op_res_t server_start(char *fname, int argc, char *argv[]);
+server_op_res_t server_install_update(void);
+server_op_res_t server_send_target_data(void);
+unsigned int server_get_polling_interval(void);
 
 /*
  * This is a "specialized" map_http_retcode() because
@@ -56,7 +66,6 @@ static struct option long_options[] = {
     {"retrywait", required_argument, NULL, 'w'},
     {"cache", required_argument, NULL, '2'},
     {"max-download-speed", required_argument, NULL, 'n'},
-    {"server", required_argument, NULL, 'S'},
     {NULL, 0, NULL, 0}};
 
 static unsigned short mandatory_argument_count = 0;
@@ -80,7 +89,7 @@ static server_progress_data progdata;
 #define ALL_MANDATORY_SET	(URL_BIT)
 
 /*
- * Define max size for a log message
+ * Defibe max size for a log message
  */
 #define MAX_LOG_SIZE 1024
 
@@ -254,12 +263,9 @@ static void *server_progress_thread (void *data)
 	channel = channel_new();
 	if (!channel) {
 		ERROR("Cannot get channel for communication");
-		pthread_exit((void *)SERVER_EINIT);
 	}
 	if (channel->open(channel, &channel_data) != CHANNEL_OK) {
 		ERROR("Cannot open channel for progress thread");
-		(void)channel->close(channel);
-		free(channel);
 		pthread_exit((void *)SERVER_EINIT);
 	}
 
@@ -323,9 +329,6 @@ static void *server_progress_thread (void *data)
 		if (logbuffer) {
 			channel_data.request_body = logbuffer;
 			channel_data.method = CHANNEL_PUT;
-			/* .format is already specified in channel_data_defaults,
-			 * but being explicit doesn't hurt. */
-			channel_data.format = CHANNEL_PARSE_NONE;
 			channel_data.content_type = "application/text";
 			result = map_channel_retcode(channel->put(channel, (void *)&channel_data));
 			if (result != SERVER_OK)
@@ -337,7 +340,6 @@ static void *server_progress_thread (void *data)
 	}
 
 	(void)channel->close(channel);
-	free(channel);
 	pthread_exit((void *)0);
 }
 
@@ -392,7 +394,7 @@ cleanup:
 	curl_easy_cleanup(curl);
 
 	if (!qry)
-		qry = strdup(url);
+		qry = url;
 
 	return qry;
 
@@ -459,6 +461,7 @@ static server_op_res_t server_get_deployment_info(channel_t *channel, channel_da
 	channel_data->url= server_prepare_query(server_general.url, &server_general.configdata);
 
 	LIST_INIT(&server_general.received_httpheaders);
+	LIST_INIT(&server_general.httpheaders_to_send);
 	channel_data->received_headers = &server_general.received_httpheaders;
 
 	result = map_http_retcode(channel->get(channel, (void *)channel_data));
@@ -477,37 +480,50 @@ static server_op_res_t server_get_deployment_info(channel_t *channel, channel_da
 	return result;
 }
 
-static server_op_res_t server_has_pending_action(int *action_id)
+server_op_res_t server_has_pending_action(int *action_id)
 {
-	*action_id = 0;
-
-	if (get_state() == STATE_INSTALLED) {
-		WARN("An already installed update is pending testing.");
-		return SERVER_NO_UPDATE_AVAILABLE;
-	}
 
 	channel_data_t channel_data = channel_data_defaults;
-	return server_get_deployment_info(server_general.channel,
-					  &channel_data);
+	server_op_res_t result =
+	    server_get_deployment_info(server_general.channel,
+				       &channel_data);
+
+	/*
+	 * action_id is not used by this server
+	 * There is no memory between one call and the next one
+	 */
+	*action_id = 0;
+
+	if ((result == SERVER_UPDATE_AVAILABLE) &&
+	    (get_state() == STATE_INSTALLED)) {
+		WARN("An already installed update is pending testing, "
+		     "ignoring available update action.");
+		INFO("Please restart SWUpdate to report the test results "
+		     "upstream.");
+		result = SERVER_NO_UPDATE_AVAILABLE;
+	}
+
+	return result;
 }
 
-static server_op_res_t server_send_target_data(void)
+server_op_res_t server_send_target_data(void)
 {
+
 	return SERVER_OK;
 }
 
-static unsigned int server_get_polling_interval(void)
+unsigned int server_get_polling_interval(void)
 {
 	return server_general.polling_interval;
 }
 
-static void server_print_help(void)
+void server_print_help(void)
 {
 	fprintf(
 	    stdout,
 	    "\t  -u, --url         * Host and port of the server instance, "
 	    "e.g., localhost:8080\n"
-	    "\t  -p, --polldelay     Delay in seconds between two server "
+	    "\t  -p, --polldelay     Delay in seconds between two hawkBit "
 	    "poll operations (default: %ds).\n"
 	    "\t  -r, --retry         Resume and retry interrupted downloads "
 	    "(default: %d tries).\n"
@@ -516,14 +532,14 @@ static void server_print_help(void)
 	    "\t  -y, --proxy         Use proxy. Either give proxy URL, else "
 	    "{http,all}_proxy env is tried.\n"
 	    "\t  -a, --custom-http-header <name> <value> Set custom HTTP header, "
-	    "appended to every HTTP request being sent.\n"
-	    "\t  -n, --max-download-speed <limit>        Set download speed limit. "
-		"Example: -n 100k; -n 1M; -n 100; -n 1G\n",
+	    "appended to every HTTP request being sent."
+	    "\t  -n, --max-download-speed <limit>	Set download speed limit."
+		"Example: -n 100k; -n 1M; -n 100; -n 1G",
 	    CHANNEL_DEFAULT_POLLING_INTERVAL, CHANNEL_DEFAULT_RESUME_TRIES,
 	    CHANNEL_DEFAULT_RESUME_DELAY);
 }
 
-static server_op_res_t server_install_update(void)
+server_op_res_t server_install_update(void)
 {
 	channel_data_t channel_data = channel_data_defaults;
 	server_op_res_t result = SERVER_OK;
@@ -591,15 +607,15 @@ static int server_general_settings(void *elem, void  __attribute__ ((__unused__)
 		SETSTRING(server_general.logurl, tmp);
 	}
 
-	GET_FIELD_INT(LIBCFG_PARSER, elem, "polldelay",
+	get_field(LIBCFG_PARSER, elem, "polldelay",
 		&server_general.polling_interval);
 
-	channel_settings(elem, &channel_data_defaults);
+	suricatta_channel_settings(elem, &channel_data_defaults);
 
 	return 0;
 }
 
-static server_op_res_t server_start(const char *fname, int argc, char *argv[])
+server_op_res_t server_start(char *fname, int argc, char *argv[])
 {
 	int choice = 0;
 
@@ -623,7 +639,7 @@ static server_op_res_t server_start(const char *fname, int argc, char *argv[])
 	/* reset to optind=1 to parse suricatta's argument vector */
 	optind = 1;
 	opterr = 0;
-	while ((choice = getopt_long(argc, argv, "u:l:r:w:p:2:a:nS:",
+	while ((choice = getopt_long(argc, argv, "u:l:r:w:p:2:a:n",
 				     long_options, NULL)) != -1) {
 		switch (choice) {
 		case 'u':
@@ -649,10 +665,8 @@ static server_op_res_t server_start(const char *fname, int argc, char *argv[])
 			SETSTRING(server_general.cached_file, optarg);
 			break;
 		case 'a':
-			if (optind >= argc) {
-				ERROR("Wrong option format for --custom-http-header, see --help.");
+			if (optind >= argc)
 				return SERVER_EINIT;
-			}
 
 			if (dict_insert_value(&server_general.httpheaders_to_send,
 						optarg,
@@ -662,17 +676,9 @@ static server_op_res_t server_start(const char *fname, int argc, char *argv[])
 			break;
 		case 'n':
 			channel_data_defaults.max_download_speed =
-				(unsigned int)ustrtoull(optarg, NULL, 10);
-			if (errno) {
-				ERROR("max-download-speed %s: ustrtoull failed",
-				      optarg);
-				return SERVER_EINIT;
-			}
+				(unsigned int)ustrtoull(optarg, 10);
 			break;
 
-		/* Ignore the --server option which is already parsed by the caller. */
-		case 'S':
-			break;
 		case '?':
 		/* Ignore not recognized options, they can be already parsed by the caller */
 		default:
@@ -699,8 +705,6 @@ static server_op_res_t server_start(const char *fname, int argc, char *argv[])
 		return SERVER_EINIT;
 
 	if (server_general.channel->open(server_general.channel, &channel_data_defaults) != CHANNEL_OK) {
-		(void)server_general.channel->close(server_general.channel);
-		free(server_general.channel);
 		return SERVER_EINIT;
 	}
 
@@ -715,32 +719,13 @@ static server_op_res_t server_start(const char *fname, int argc, char *argv[])
 	return SERVER_OK;
 }
 
-static server_op_res_t server_stop(void)
+server_op_res_t server_stop(void)
 {
 	(void)server_general.channel->close(server_general.channel);
-	free(server_general.channel);
-	dict_drop_db(&server_general.httpheaders_to_send);
 	return SERVER_OK;
 }
 
-static server_op_res_t server_ipc(ipc_message __attribute__ ((__unused__)) *msg)
+server_op_res_t server_ipc(ipc_message __attribute__ ((__unused__)) *msg)
 {
 	return SERVER_OK;
-}
-
-static server_t server = {
-	.has_pending_action = &server_has_pending_action,
-	.install_update = &server_install_update,
-	.send_target_data = &server_send_target_data,
-	.get_polling_interval = &server_get_polling_interval,
-	.start = &server_start,
-	.stop = &server_stop,
-	.ipc = &server_ipc,
-	.help = &server_print_help,
-};
-
-__attribute__((constructor))
-static void register_server_general(void)
-{
-	register_server("general", &server);
 }

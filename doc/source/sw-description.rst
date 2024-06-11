@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <stefano.babic@swupdate.org>
+.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <sbabic@denx.de>
 .. SPDX-License-Identifier: GPL-2.0-only
 
 =================================================
@@ -23,7 +23,7 @@ for an explanation of basic types.
 The whole description must be contained in the sw-description file itself:
 using of the #include directive is not allowed by SWUpdate.
 
-The following example explains the implemented tags:
+The following example explains better the implemented tags:
 
 ::
 
@@ -122,7 +122,7 @@ Handling configuration differences
 
 The concept can be extended to deliver a single image
 containing the release for multiple devices. Each device has its own
-kernel, dtb, and root filesystem, or they can share some parts.
+kernel, dtb and root filesystem, or they can share some parts.
 
 Currently this is managed (and already used in a real project) by
 writing an own parser, that checks which images must be installed
@@ -197,9 +197,9 @@ Multiple devices are supported by the default parser, too.
 In this way, it is possible to have a single image providing software
 for each device you have.
 
-By default, the hardware information is extracted from
+By default the hardware information is extracted from
 `/etc/hwrevision` file. The file should contain a single line in the
-following format:
+following format::
 
   <boardname> <revision>
 
@@ -313,10 +313,10 @@ Take an example. The following sw-description describes the release for a set of
             }
     }
 
-On *myboard*, SWUpdate searches and finds myboard.stable.copy1(2). When running on different
-boards, SWUpdate does not find an entry corresponding to the boardname and it falls back to the
-version without boardname. This allows to realize the same release for different boards having
-a completely different hardware. `myboard` could have an eMMC and an ext4 filesystem,
+On *myboard*, SWUpdate searches and find myboard.stable.copy1(2). When running on different
+boards, SWUpdate does not find an entry corresponding to the boardname and it fallbacks to the
+version without boardname. This lets realize the same release for different boards having
+a complete different hardware. `myboard` could have a eMMC and an ext4 filesystem,
 while another device can have raw flash and install an UBI filesystem. Nevertheless, they are
 both just a different format of the same release and they could be described together in sw-description.
 It is important to understand the priorities how SWUpdate scans for entries during the parsing.
@@ -338,7 +338,7 @@ the section with `-e stable,<rev number>`.
 		myboard = {
 	            stable = {
 
-			hardware-compatibility: ["1.0", "1.2", "2.0", "1.3", "3.0", "3.1"];
+			hardware-compatibility: ["1.0", "1.2", "2.0", "1.§, "3.0", "3.1"];
 			rev-1.0: {
 				images: (
 					...
@@ -402,7 +402,7 @@ the section with `-e stable,<rev number>`.
 If each of them requires an own section, it is the way to do. Anyway, it is more probable
 than revisions can be grouped together, for example board with the same major revision
 number could have the same installation instructions. This leads in the example to 3 groups
-for rev1.X, rev2.X, and rev3.X. Links allow one to group section together. When a "ref" is found
+for rev1.X, rev2.X and rev3.X. Links allow one to group section together. When a "ref" is found
 when SWUpdate searches for a group (images, files, script, bootenv), it replaces the current path
 in the tree with the value of the string. In this way, the example above can be written in this way:
 
@@ -415,7 +415,7 @@ in the tree with the value of the string. In this way, the example above can be 
                 myboard = {
 	            stable = {
 
-                        hardware-compatibility: ["1.0", "1.2", "2.0", "1.3", "3.0", "3.1"];
+                        hardware-compatibility: ["1.0", "1.2", "2.0", "1.3, "3.0", "3.1"];
                         rev-1x: {
                                 images: (
                                    ...
@@ -467,7 +467,7 @@ The link can be absolute or relative. The keyword *"ref"* is used to indicate a 
 will traverse the tree and replaces the current path with the values find in the string pointed by "ref". There are
 simple rules for a link:
 
-       - it must start with the character '#'
+       - it must start with the character '#' 
        - "." points to the current level in the tree, that means the parent of "ref"
        - ".." points to the parent level in the tree
        - "/" is used as filed separator in the link
@@ -478,7 +478,7 @@ leading "../" to move the current cursor to the parent leaf of the tree.
 In the following example, rev40 sets a link to a "common" section, where `images`
 is found. This is sets via a link, too, to a section in the parent node.
 The path `software.myboard.stable.common.images`  is then replaced by
-`software.myboard.stable.trythis`
+`software.myboard.stable.trythis` 
 
 ::
 
@@ -496,7 +496,7 @@ The path `software.myboard.stable.common.images`  is then replaced by
 	  stable:{
 
 	    common:{
-		images =
+		images = 
 		{
 		  ref = "#./../trythis";
 		}
@@ -560,7 +560,7 @@ Example:
 	hardware-compatibility: [ "1.0", "1.2", "1.3"];
 
 This defines that the software is compatible with HW-Revisions 1.0,
-1.2, and 1.3, but not with 1.1 or any other version not explicitly
+1.2 and 1.3, but not with 1.1 or any other version not explicitly
 listed here. In the above example, compatibility is checked by means
 of string comparison. If the software is compatible with a large
 number of hardware revisions, it may get cumbersome to enumerate all
@@ -681,7 +681,7 @@ The offset handles the following multiplicative suffixes: K=1024 and M=1024*1024
 
 However, writing to flash in raw mode must be managed in a special
 way. Flashes must be erased before copying, and writing into NAND
-must take care of bad blocks and ECC errors. For these reasons, the
+must take care of bad blocks and ECC errors. For this reasons, the
 handler "flash" must be selected:
 
 For example, to copy the kernel into the MTD7 of a NAND flash:
@@ -738,17 +738,6 @@ As a general rule, swupdate doesn't copy out a file if the destination path
 doesn't exists. This behavior could be changed using the special property
 "create-destination".
 
-As another general rule, the raw file handler installs the file directly to the
-specified path. If the target file already exists and the raw file handler
-is interrupted, the existing file may be replaced by an empty or partially
-written file. A use case can exist where having an empty or corrupted file is
-worse than the existing file. For this reason, the raw file handler supports an
-"atomic-install" property. Setting the property to "true" installs the file to
-the specified path with ".tmp" appended to the filename. Once the contents of
-the file have been written and the buffer is flushed, the ".tmp" file is renamed
-to the target file. This minimizes chances that an empty or corrupted file is
-created by an interrupted raw file handler.
-
 Scripts
 -------
 
@@ -759,9 +748,7 @@ with an error if the result is <> 0.
 They are copied into a temporary directory before execution and their name must
 be unique inside the same cpio archive.
 
-If no type is given, SWUpdate default to "lua". Please note that running a shell script
-opens a set of different security issues, check also chapter "Best practise".
-
+If no type is given, SWUpdate default to "lua".
 
 Lua
 ...
@@ -792,23 +779,11 @@ called before installing the images.
 
 	function postinst()
 
-
 SWUpdate scans for all scripts and check for a postinst function. It is
 called after installing the images.
 
-::
-
-	function postfailure()
-
-Only in case an update fails, SWUpdate scans for all scripts and check
-for a postfailure function. This could be useful in case it is necessary
-to restore a previous state, for example, in case the application was
-stop, it should run again.
-
 shellscript
 ...........
-
-SWUpdate will run the binary shell "/bin/sh" to execute the script.
 
 ::
 
@@ -819,9 +794,9 @@ SWUpdate will run the binary shell "/bin/sh" to execute the script.
 		}
 	);
 
-Shell scripts are called by forking the process and running the shell as /bin/sh.
+Shell scripts are called via system command.
 SWUpdate scans for all scripts and calls them before and after installing
-the images. SWUpdate passes 'preinst', 'postinst' or 'postfailure' as first argument to
+the images. SWUpdate passes 'preinst' or 'postinst' as first argument to
 the script.
 If the data attribute is defined, its value is passed as the last argument(s)
 to the script.
@@ -842,14 +817,6 @@ preinstall are shell scripts and called via system command.
 SWUpdate scans for all scripts and calls them before installing the images.
 If the data attribute is defined, its value is passed as the last argument(s)
 to the script.
-
-Note that cannot be ensured that preinstall scripts run before an artifact is
-installed in streaming mode. In fact, if streaming is activated, the artifact must
-be installed as soon as it is received from network because there is no temporary
-copy. Because there is no fix order in the SWU, an artifact can be packed before any
-script in the SWU. The right way is to write an "embedded-script" in Lua inside
-sw-description: because it becomes part of sw-description, it runs when sw-description is
-parsed and before any handler runs, even before a partition handler.
 
 postinstall
 ...........
@@ -905,33 +872,6 @@ environment variable "ustate" (default) to `STATE_INSTALLED=1` or
 `STATE_FAILED=3` after an installation. This behavior can be turned off
 globally via the `-m` option to SWUpdate or per `sw-description` via the
 boolean switch "bootloader_state_marker".
-
-reboot flag
------------
-
-It is possible to signal that a reboot for a specific update is not required.
-This information is evaluated by SWUpdate just to inform a backend about the
-transaction result. If a postinstall script (command line parameter -p) is
-passed at the startup to perform a reboot, it will be executed anyway because
-SWUpdate cannot know the nature of this script.
-
-SWUpdate sends this information to the progress interface and it is duty of the
-listeners to interprete the information. The attribute is a boolean:
-
-::
-
-        reboot = false;
-
-Attribute belongs to the general section, where also version belongs. It is
-not required to activate the flag with `reboot = true` because it is the
-default behavior, so just disabling makes sense.
-
-The tool `swupdate-progress` interprets the flag: if it was started with
-reboot support (-r parameter), it checks if a "no-reboot" message is received
-and disables to reboot the device for this specific update. When the transaction
-completes, the reboot feature is activated again in case a new update will require to
-reboot the device. This allows to have on the fly updates, where not the whole
-software is updated and a reboot is not required.
 
 bootloader
 ----------
@@ -997,36 +937,6 @@ For backward compatibility with previously built `.swu` images, the
 "uboot" group name is still supported as an alias. However, its usage
 is deprecated.
 
-SWUpdate persistent variables
------------------------------
-
-Not all updates require to inform the bootloader about the update, and in many cases a
-reboot is not required. There are also cases where changing bootloader's environment
-is unwanted due to restriction for security.
-SWUpdate needs then some information after new software is running to understand if
-everything is fine or some actions like a fallback are needed. SWUpdate can store
-such as information in variables (like shell variables), that can be stored persistently.
-The library `libubootenv` provide a way for saving such kind as database in a power-cut safe mode.
-It uses the algorythm originally implemented in the U-Boot bootloader. It is then guaranteed
-that the system will always have a valid instance of the environment. The library supports multiple
-environment databases at the same time, identifies with `namespaces`.
-SWUpdate should be configured to set the namespace used for own variables. This is done by setting
-the attribute *namespace-vars* in the runtime configuration file (swupdate.cfg). See also
-example/configuration/swupdate.cfg for details.
-
-The format is the same used with bootloader for single variable:
-
-::
-
-	vars: (
-		{
-			name = <Variable name>;
-			value = <Variable value>;
-		}
-	)
-
-SWUpdate will set these variables all at once like the bootloader variables. These environment
-is stored just before writing the bootloader environment, that is always the last step in an update.
 
 Board specific settings
 -----------------------
@@ -1159,9 +1069,9 @@ SWUpdate supports a version based on the schema:
 where each field is a plain number (no alphanumeric) in the range 0..65535.
 User can add further fields using the dot separator, but they are not
 considered for version comparison. SWUpdate will check if a version
-number is set according to this rule and fall back to semantic version
-upon failure. The version is converted to a 64 bit number (each field is 16 bit)
-and compared against the running version of the same artifact.
+number is set according to this rule, and fallback to semantic version
+if fails. The version is converted in a 64 bit number (each field is 16 bit)
+and compare with the running version of the same artifact.
 
 Please consider that, because additional fields are descriptive only, for the
 comparison they are not considered. This example contains version numbers
@@ -1179,7 +1089,7 @@ But the following is different:
 
         1.2.3.4-alpha
 
-And it is treated as semantic version.
+And it is treated as semantic version
 
 Semantic version
 ----------------
@@ -1206,13 +1116,13 @@ device in a single file, but the device should install it just when needed.
 SWUpdate searches for a file (/etc/sw-versions is the default location)
 containing all versions of the installed images. This must be generated
 before running SWUpdate.
-The file must contain pairs with the name of image and version, as:
+The file must contains pairs with the name of image and his version, as:
 
 ::
 
 	<name of component>	<version>
 
-In sw-description, the optional attributes "name", "version", and
+In sw-description, the optional attributes "name", "version" and
 "install-if-different" provide the connection. Name and version are then
 compared with the data in the versions file. install-if-different is a
 boolean that enables the check for this image. It is then possible to
@@ -1259,7 +1169,7 @@ These attributes are used for an embedded-script:
 
 ::
 
-		embedded-script = "<Lua code>"
+		embedded-script = "<Lua code">
 
 It must be taken into account that the parser has already run and usage of double quotes can
 interfere with the parser. For this reason, each double quote in the script must be escaped.
@@ -1276,7 +1186,7 @@ must be changed to:
 
         print (\"Test\")
 
-If not, the parser thinks to have the closure of the script and this generates an error.
+If not, the parser thinks to have the closure of the script and this generates an error. 
 See the examples directory for examples how to use it.
 Any entry in files or images can trigger one function in the script. The "hook" attribute
 tells the parser to load the script and to search for the function pointed to by the hook
@@ -1311,7 +1221,7 @@ a "-", it is replaced with "_", because "-" cannot be used in Lua. This means, f
 ::
 
         install-if-different ==> install_if_different
-        installed-directly   ==> installed_directly
+        install-directly     ==> install_directly
 
 Attributes can be changed in the Lua script and values are taken over on return.
 The Lua function must return 2 values:
@@ -1408,7 +1318,7 @@ There are 4 main sections inside sw-description:
    +-------------+----------+------------+---------------------------------------+
    | type        | string   | images     | string identifier for the handler,    |
    |             |          | files      | as it is set by the handler when it   |
-   |             |          | scripts    | registers itself.                     |
+   |             |          | scripts    | regitsters itself.                    |
    |             |          |            | Example: "ubivol", "raw", "rawfile",  |
    +-------------+----------+------------+---------------------------------------+
    | compressed  | string   | images     | string to indicate the "filename" is  |
@@ -1419,7 +1329,7 @@ There are 4 main sections inside sw-description:
    |             |          |            | and "zstd".                           |
    +-------------+----------+------------+---------------------------------------+
    | compressed  | bool (dep| images     | Deprecated. Use the string form. true |
-   |             | recated) | files      | is equal to 'compressed = "zlib"'.    |
+   |             | recated) | files      | is equal to 'compression = "zlib"'.   |
    +-------------+----------+------------+---------------------------------------+
    | installed-\ | bool     | images     | flag to indicate that image is        |
    | directly    |          |            | streamed into the target without any  |
@@ -1445,18 +1355,13 @@ There are 4 main sections inside sw-description:
    | description | string   |            | user-friendly description of the      |
    |             |          |            | swupdate archive (any string)         |
    +-------------+----------+------------+---------------------------------------+
-   | reboot      | bool     |            | allows to disable reboot for the      |
-   |             |          |            | current running update                |
-   +-------------+----------+------------+---------------------------------------+
    | install-if\ | bool     | images     | flag                                  |
    | -different  |          | files      | if set, name and version are          |
    |             |          |            | compared with the entries in          |
-   |             |          |            | sw-versions                           |
    +-------------+----------+------------+---------------------------------------+
    | install-if\ | bool     | images     | flag                                  |
    | -higher     |          | files      | if set, name and version are          |
    |             |          |            | compared with the entries in          |
-   |             |          |            | sw-versions                           |
    +-------------+----------+------------+---------------------------------------+
    | encrypted   | bool     | images     | flag                                  |
    |             |          | files      | if set, file is encrypted             |
@@ -1468,7 +1373,7 @@ There are 4 main sections inside sw-description:
    |             |          | scripts    | set. Each artefact can have an own    |
    |             |          |            | IVT to avoid attacker can guess the   |
    |             |          |            | the key.                              |
-   |             |          |            | It is an ASCII string of 32 chars     |
+   |             |          |            | It is a ASCII string of 32 chars      |
    +-------------+----------+------------+---------------------------------------+
    | data        | string   | images     | This is used to pass arbitrary data   |
    |             |          | files      | to a handler.                         |

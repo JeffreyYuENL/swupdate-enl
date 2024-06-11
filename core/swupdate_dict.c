@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * Copyright (C) 2018 Weidmüller Interface GmbH & Co. KG
  * Stefan Herbrechtsmeier <stefan.herbrechtsmeier@weidmueller.com>

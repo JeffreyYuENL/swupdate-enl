@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -18,7 +18,6 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/select.h>
-#include <sys/reboot.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -54,9 +53,12 @@ static void resetterm(void)
 }
 
 static void textcolor(int attr, int fg, int bg)
-{
+{	char command[13];
+
+	/* Command is the control command to the terminal */
+	sprintf(command, "%c[%d;%d;%dm", 0x1B, attr, fg + 30, bg + 40);
 	if (!silent)
-		fprintf(stdout, "%c[%d;%d;%dm", 0x1B, attr, fg + 30, bg + 40);
+		fprintf(stdout, "%s", command);
 }
 
 static struct option long_options[] = {
@@ -189,31 +191,6 @@ static void fill_progress_bar(char *bar, size_t size, unsigned int percent)
 	memset(&bar[filled_len], '-', remain);
 }
 
-static void reboot_device(void)
-{
-	sleep(5);
-	sync();
-	if (reboot(RB_AUTOBOOT) < 0) { /* Should never happen. */
-		fprintf(stdout, "Please reset the board.\n");
-	}
-}
-
-static void run_post_script(char *script, struct progress_msg *msg)
-{
-	char *cmd;
-	if (asprintf(&cmd, "%s %s", script,
-		     msg->status == SUCCESS ?
-		     "SUCCESS" : "FAILURE") == -1) {
-		fprintf(stderr, "OOM calling post-exec script\n");
-		return;
-	}
-	int ret = system(cmd);
-	if (ret) {
-		fprintf(stdout, "Executed %s with error : %d\n", cmd, ret);
-	}
-	free(cmd);
-}
-
 int main(int argc, char **argv)
 {
 	int connfd;
@@ -230,13 +207,12 @@ int main(int argc, char **argv)
 	int opt_r = 0;
 	int opt_p = 0;
 	int c;
+	int ret;
 	char *script = NULL;
 	bool wait_update = true;
-	bool disable_reboot = false;
-	bool redirected = false;
 
 	/* Process options with getopt */
-	while ((c = getopt_long(argc, argv, "cwprhs:e:q",
+	while ((c = getopt_long(argc, argv, "cwprhs:e:",
 				long_options, NULL)) != EOF) {
 		switch (c) {
 		case 'c':
@@ -270,19 +246,13 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+		
+	rundir = getenv("PSPLASH_FIFO_DIR");
+	if (!rundir)
+		rundir = "/run";
+	snprintf(psplash_pipe_path, sizeof(psplash_pipe_path), "%s/psplash_fifo", rundir);
 
-	if (opt_p) {
-		rundir = getenv("PSPLASH_FIFO_DIR");
-		if(!rundir){
-			rundir = getenv("RUNTIME_DIRECTORY");
-		}
-		if (!rundir)
-			rundir = "/run";
-		snprintf(psplash_pipe_path, sizeof(psplash_pipe_path), "%s/psplash_fifo", rundir);
-	}
 	connfd = -1;
-	redirected = !isatty(fileno(stdout));
-
 	while (1) {
 		if (connfd < 0) {
 			connfd = progress_ipc_connect(opt_w);
@@ -327,9 +297,6 @@ int main(int argc, char **argv)
 					fprintf(stdout, "LOCAL\n\n");
 					break;
 				}
-				/*
-				 * Reset some per update variables prior to update.
-				 */
 				curstep = 0;
 				wait_update = false;
 			}
@@ -339,31 +306,11 @@ int main(int argc, char **argv)
 		 * Be sure that string in message are Null terminated
 		 */
 		if (msg.infolen > 0) {
-			char *reboot_mode;
-			int n, cause;
-
 			if (msg.infolen >= sizeof(msg.info) - 1) {
 				msg.infolen = sizeof(msg.info) - 1;
 			}
 			msg.info[msg.infolen] = '\0';
-			fprintf(stdout, "INFO : %s\n", msg.info);
-
-			/*
-			 * Check for no-reboot mode
-			 * Just do a simple parsing for now. If more messages
-			 * will be added, JSON lib should be linked.
-			 * NOTE: Until then, the exact string format is imperative!
-			 */
-			n = sscanf(msg.info, "{\"%d\": { \"reboot-mode\" : \"%m[-a-z]\"}}",
-				   &cause, &reboot_mode);
-			if (n == 2) {
-				if (cause == CAUSE_REBOOT_MODE) {
-					if (!strcmp(reboot_mode, "no-reboot")) {
-						disable_reboot = true;
-					}
-				}
-				free(reboot_mode);
-			}
+			fprintf(stdout, "INFO : %s\r", msg.info);
 		}
 		msg.cur_image[sizeof(msg.cur_image) - 1] = '\0';
 
@@ -388,8 +335,6 @@ int main(int argc, char **argv)
 						bar,
 						msg.cur_step, msg.nsteps, msg.cur_percent,
 						msg.cur_image, msg.dwl_percent, msg.dwl_bytes);
-					if (redirected)
-						fprintf(stdout, "\n");
 					fflush(stdout);
 				}
 
@@ -415,55 +360,33 @@ int main(int argc, char **argv)
 							  ? "SUCCESS"
 							  : "FAILURE");
 			if (script) {
-				run_post_script(script, &msg);
+				char *cmd;
+				if (asprintf(&cmd, "%s %s", script,
+						msg.status == SUCCESS ?
+						"SUCCESS" : "FAILURE") == -1) {
+					fprintf(stderr, "OOM calling post-exec script\n");
+				} else {
+					ret = system(cmd);
+					if (ret) {
+						fprintf(stdout, "Executed %s with error : %d\n", cmd, ret);
+					}
+					free(cmd);
+				}
 			}
 			resetterm();
-
-			if (psplash_ok && msg.status == FAILURE) {
+			if (psplash_ok)
 				psplash_progress(psplash_pipe_path, &msg);
-				psplash_ok = 0;
+			psplash_ok = 0;
+			if ((msg.status == SUCCESS) && (msg.cur_step > 0) && opt_r) {
+				sleep(5);
+				if (system("reboot") < 0) { /* It should never happen */
+					fprintf(stdout, "Please reset the board.\n");
+				}
 			}
-			if (psplash_ok && disable_reboot) {
-				fprintf(stdout,
-					"\nReboot disabled or waiting for activation.\n");
-				char *buf = alloca(PSPLASH_MSG_SIZE);
-				snprintf(buf, PSPLASH_MSG_SIZE - 1,
-					 "MSG Reboot disabled or waiting for activation.");
-				psplash_write_fifo(psplash_pipe_path, buf);
-			}
-
-			if ((msg.status == SUCCESS) && (msg.cur_step > 0) && opt_r && !disable_reboot) {
-				reboot_device();
-			}
-			/*
-			 * Reset per update variables after update.
-			 */
-			disable_reboot = false;
 			wait_update = true;
 			break;
 		case DONE:
 			fprintf(stdout, "\nDONE.\n\n");
-			break;
-		case PROGRESS:
-			/*
-			 * Could also check for "source": <sourcetype> as sent
-			 * by wfx but that's left for later when we have full
-			 * JSON support here.
-			 */
-			if (strcasestr(msg.info, "\"module\": \"wfx\"") &&
-			    strcasestr(msg.info, "\"state\": \"ACTIVATING\"") &&
-			    strcasestr(msg.info, "\"progress\": 100")) {
-				if (psplash_ok) {
-					msg.status = SUCCESS;
-					psplash_progress(psplash_pipe_path, &msg);
-					psplash_ok = 0;
-				}
-				if (opt_r && strcasestr(msg.info, "firmware")) {
-					reboot_device();
-					break;
-				}
-				fprintf(stdout, "\nDon't know how to activate this update, doing nothing.\n");
-			}
 			break;
 		default:
 			break;

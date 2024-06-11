@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -11,7 +11,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
-#include <stdlib.h>
 #if defined(__linux__)
 #include <sys/prctl.h>
 #endif
@@ -29,12 +28,6 @@
 #ifndef WAIT_ANY
 #define WAIT_ANY (-1)
 #endif
-
-typedef struct {
-	int (*exec)(int argc, char **argv);
-	int argc;
-	char **argv;
-} bgtask;
 
 /* the array contains the pid of the subprocesses */
 #define MAX_PROCESSES	10
@@ -68,7 +61,7 @@ static pthread_cond_t threads_towait_cond = PTHREAD_COND_INITIALIZER;
 #if defined(__linux__)
 static void parent_dead_handler(int __attribute__ ((__unused__)) dummy)
 {
-	_exit(1);
+	exit(1);
 }
 #endif
 
@@ -136,7 +129,7 @@ static int spawn_process(struct swupdate_task *task,
 	/*
 	 * Create the pipe to exchange data with the child
 	 */
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockfd) < 0) {
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockfd) < 0) {
 		ERROR("socketpair fails : %s", strerror(errno));
 		return -1;
 	}
@@ -246,121 +239,83 @@ void start_subprocess(sourcetype type, const char *name,
 }
 
 /*
- * run_cmd executes a shell script or an internal function in background
- * in a separate process and intercepts stdout and stderr, writing then to
- * TRACE and ERROR.
- * This let the output of the scripts / functions to be collected by SWUpdate
+ * run_system_cmd executes a shell script in background and intercepts
+ * stdout and stderr of the script, writing then to TRACE and ERROR
+ * This let the output of the scripts to be collected by SWUpdate
  * tracing capabilities.
  */
-static int __run_cmd(const char *cmd, bgtask *fn)
+int run_system_cmd(const char *cmd)
 {
 	int ret = 0;
-	int const npipes = 4;
-	int pipes[npipes][2];
-	LOGLEVEL levels[4] = { TRACELEVEL, ERRORLEVEL, INFOLEVEL, WARNLEVEL };
+	int stdoutpipe[2];
+	int stderrpipe[2];
 	pid_t process_id;
 	int const PIPE_READ = 0;
 	int const PIPE_WRITE = 1;
-	int wstatus, i;
-	bool execute_function = !(cmd && strnlen(cmd, SWUPDATE_GENERAL_STRING_SIZE)) && fn;
+	int wstatus;
 
-	/*
-	 * There are two cases:
-	 * - an external command should be executed (cmd is not NULL)
-	 * - an internal SWUpdate function must be executed in bg process
-	 * Both cannot be executed, the external command has priority
-	 */
+	if (!strnlen(cmd, SWUPDATE_GENERAL_STRING_SIZE))
+		return 0;
 
-	/*
-	 * Check parameter in case of external command or internal function
-	 * that should run in a separate process
-	 */
-	if (!execute_function) {
-		/*
-		 * If no cmd and function are passed, just return without error
-		 * like "nothing was successfully executed"
-		 */
-		if (!cmd)
-			return 0;
-		if (!strnlen(cmd, SWUPDATE_GENERAL_STRING_SIZE))
-			return 0;
-		if (strnlen(cmd, SWUPDATE_GENERAL_STRING_SIZE) > SWUPDATE_GENERAL_STRING_SIZE) {
-			ERROR("Command string too long, skipping..");
-			/* do nothing */
-			return -EINVAL;
-		}
+	if (strnlen(cmd, SWUPDATE_GENERAL_STRING_SIZE) > SWUPDATE_GENERAL_STRING_SIZE) {
+		ERROR("Command string too long, skipping..");
+		/* do nothing */
+		return -EINVAL;
 	}
 
 	/*
 	 * Creates pipes to intercept stdout and stderr of the
 	 * child process
 	 */
-	for (i = 0; i < npipes; i++) {
-		if (pipe(pipes[i]) < 0) {
-			ERROR("Could not create pipes for subprocess, existing...");
-			break;
-		}
+	if (pipe(stdoutpipe) < 0) {
+		ERROR("stdout pipe cannot be created, exiting...");
+		return -EFAULT;
 	}
-	if (i < npipes) {
-		while (i >= 0) {
-			close(pipes[i][0]);
-			close(pipes[i][1]);
-			i--;
-		}
+	if (pipe(stderrpipe) < 0) {
+		ERROR("stderr pipe cannot be created, exiting...");
+		close(stdoutpipe[0]);
+		close(stdoutpipe[1]);
 		return -EFAULT;
 	}
 
 	process_id = fork();
 	/* Child process, this runs the shell command */
 	if (process_id == 0) {
-		if (dup2(pipes[0][PIPE_WRITE], STDOUT_FILENO) < 0)
+		if (dup2(stdoutpipe[PIPE_WRITE], STDOUT_FILENO) < 0)
 			exit(errno);
-		if (dup2(pipes[1][PIPE_WRITE], STDERR_FILENO) < 0)
+		if (dup2(stderrpipe[PIPE_WRITE], STDERR_FILENO) < 0)
 			exit(errno);
-		/* posix sh cannot use fd >= 10, so dup these to lower
-		 * numbers for convenience */
-		if (dup2(pipes[2][PIPE_WRITE], 3) < 0)
-			exit(errno);
-		setenv("SWUPDATE_INFO_FD", "3", 1);
-		if (dup2(pipes[3][PIPE_WRITE], 4) < 0)
-			exit(errno);
-		setenv("SWUPDATE_WARN_FD", "4", 1);
-
 		/* close all pipes, not used anymore */
-		for (i = 0; i < npipes; i++) {
-			close(pipes[i][PIPE_READ]);
-			close(pipes[i][PIPE_WRITE]);
-		}
+		close(stdoutpipe[PIPE_READ]);
+		close(stdoutpipe[PIPE_WRITE]);
+		close(stderrpipe[PIPE_READ]);
+		close(stderrpipe[PIPE_WRITE]);
 
-		if (!execute_function) {
-			ret = execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-			if (ret) {
-				ERROR("Process %s cannot be started: %s", cmd, strerror(errno));
-				exit(1);
-			}
-		} else {
-			ret = fn->exec(fn->argc, fn->argv);
-			exit(ret);
+		ret = execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+		if (ret) {
+			ERROR("Process %s cannot be started: %s", cmd, strerror(errno));
+			exit(1);
 		}
 	} else {
-		int fds[npipes];
-		int fdmax = 0;
+		int fds[2];
 		pid_t w;
+		char buf[2][SWUPDATE_GENERAL_STRING_SIZE];
+		int cindex[2] = {0, 0}; /* this is the first free char inside buffer */
+		LOGLEVEL levels[2] = { TRACELEVEL, ERRORLEVEL };
+
+		close(stdoutpipe[PIPE_WRITE]);
+		close(stderrpipe[PIPE_WRITE]);
+
+		fds[0] = stdoutpipe[PIPE_READ];
+		fds[1] = stderrpipe[PIPE_READ];
+
 		/*
 		 * Use buffers (for stdout and stdin) to collect data from
 		 * the cmd. Data can contain multiple lines or just a part
 		 * of a line and must be parsed
 		 */
-		char buf[npipes][SWUPDATE_GENERAL_STRING_SIZE];
-		int cindex[npipes];
-
-		for (i = 0; i < npipes; i++) {
-			close(pipes[i][PIPE_WRITE]);
-			fds[i] = pipes[i][PIPE_READ];
-			memset(buf[i], 0, sizeof(buf[i]));
-			cindex[i] = 0;
-			if (fds[i] > fdmax) fdmax = fds[i];
-		}
+		memset(buf[0], 0, SWUPDATE_GENERAL_STRING_SIZE);
+		memset(buf[1], 0, SWUPDATE_GENERAL_STRING_SIZE);
 
 		/*
 		 * Now waits until the child process exits and checks
@@ -371,13 +326,13 @@ static int __run_cmd(const char *cmd, bgtask *fn)
 			int n1 = 0;
 			struct timeval tv;
 			fd_set readfds;
-			int n;
+			int n, i;
 
 			w = waitpid(process_id, &wstatus, WNOHANG);
 			if (w == -1) {
 				ERROR("Error from waitpid() !!");
-				close(pipes[0][PIPE_READ]);
-				close(pipes[1][PIPE_READ]);
+				close(stdoutpipe[PIPE_READ]);
+				close(stderrpipe[PIPE_READ]);
 				return -EFAULT;
 			}
 
@@ -387,15 +342,15 @@ static int __run_cmd(const char *cmd, bgtask *fn)
 			/* Check if the child has sent something */
 			do {
 				FD_ZERO(&readfds);
-				for (i = 0; i < npipes; i++)
-					FD_SET(fds[i], &readfds);
+				FD_SET(fds[0], &readfds);
+				FD_SET(fds[1], &readfds);
 
 				n1 = 0;
-				ret = select(fdmax + 1, &readfds, NULL, NULL, &tv);
+				ret = select(max(fds[0], fds[1]) + 1, &readfds, NULL, NULL, &tv);
 				if (ret <= 0)
 					break;
 
-				for (i = 0; i < npipes ; i++) {
+				for (i = 0; i < 2 ; i++) {
 					char *pbuf = buf[i];
 					int *c = &cindex[i];
 					LOGLEVEL level = levels[i];
@@ -412,7 +367,7 @@ static int __run_cmd(const char *cmd, bgtask *fn)
 		} while (w != process_id);
 
 		/* print any unfinished line */
-		for (i = 0; i < npipes; i++) {
+		for (int i = 0; i < 2; i++) {
 			if (cindex[i]) {
 				switch(i) {
 				case 0:
@@ -423,17 +378,19 @@ static int __run_cmd(const char *cmd, bgtask *fn)
 					break;
 				}
 			}
-			close(pipes[i][PIPE_READ]);
 		}
+
+		close(stdoutpipe[PIPE_READ]);
+		close(stderrpipe[PIPE_READ]);
 
 		if (WIFEXITED(wstatus)) {
 			ret = WEXITSTATUS(wstatus);
-			TRACE("%s command returned %d", cmd ? cmd : "", ret);
+			TRACE("%s command returned %d", cmd, ret);
 		} else if (WIFSIGNALED(wstatus)) {
-			TRACE("(%s) killed by signal %d\n", cmd ? : "", WTERMSIG(wstatus));
+			TRACE("(%s) killed by signal %d\n", cmd, WTERMSIG(wstatus));
 			ret = -1;
 		} else {
-			TRACE("(%s) not exited nor killed!\n", cmd ? cmd : "");
+			TRACE("(%s) not exited nor killed!\n", cmd);
 			ret = -1;
 		}
 	}
@@ -441,19 +398,6 @@ static int __run_cmd(const char *cmd, bgtask *fn)
 	return ret;
 }
 
-int run_system_cmd(const char *cmd) {
-	return __run_cmd(cmd, NULL);
-}
-
-int run_function_background(void *fn, int argc, char **argv) {
-	bgtask bg;
-
-	bg.exec = fn;
-	bg.argc = argc;
-	bg.argv = argv;
-
-	return __run_cmd(NULL, &bg);
-}
 /*
  * The handler supervises the subprocesses
  * (Downloader, Webserver, Suricatta)
@@ -485,11 +429,9 @@ void sigchld_handler (int __attribute__ ((__unused__)) signum)
 			hasdied = 0;
 			if (WIFEXITED(status)) {
 				hasdied = 1;
-				exit_code = WEXITSTATUS(status);
-				printf("exited, status=%d\n", exit_code);
+				printf("exited, status=%d\n", WIFEXITED(status));
 			} else if (WIFSIGNALED(status)) {
 				hasdied = 1;
-				exit_code = EXIT_FAILURE;
 				printf("killed by signal %d\n", WTERMSIG(status));
 			} else if (WIFSTOPPED(status)) {
 				printf("stopped by signal %d\n", WSTOPSIG(status));
@@ -544,28 +486,4 @@ const char *pctl_getname_from_type(sourcetype s)
 	}
 
 	return "";
-}
-
-void *ipc_thread_fn(void *data)
-{
-	fd_set readfds;
-	int retval;
-	server_ipc_fn fn = (server_ipc_fn)data;
-
-	while (1) {
-		FD_ZERO(&readfds);
-		FD_SET(sw_sockfd, &readfds);
-		retval = select(sw_sockfd + 1, &readfds, NULL, NULL, NULL);
-
-		if (retval < 0) {
-			TRACE("IPC awakened because of: %s", strerror(errno));
-			return 0;
-		}
-
-		if (retval && FD_ISSET(sw_sockfd, &readfds)) {
-			if (fn(sw_sockfd) != SERVER_OK) {
-				DEBUG("Handling IPC failed!");
-			}
-		}
-	}
 }

@@ -1,11 +1,13 @@
 /*
  * (C) Copyright 2020
- * Stefano Babic <stefano.babic@swupdate.org>
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
 
-#pragma once
+#ifndef _INSTALLER_PRIV_H
+#define _INSTALLER_PRIV_H
+
 #include "swupdate_status.h"
 #include "network_ipc.h"
 
@@ -18,3 +20,5 @@ struct installer {
 	struct swupdate_request req;
 	struct swupdate_cfg *software;
 };
+
+#endif

@@ -11,8 +11,6 @@
 #include <handler.h>
 #include <blkid/blkid.h>
 #include <fs_interface.h>
-#include "progress.h"
-#include "swupdate_image.h"
 
 void diskformat_handler(void);
 
@@ -35,7 +33,7 @@ static int diskformat(struct img_type *img,
 
 	char *force = dict_get_value(&img->properties, "force");
 
-	if (force != NULL && strtobool(force)) {
+	if (force != NULL && strcmp(force, "true") == 0) {
 		; /* Skip file system exists check */
 	} else {
 		/* Check if file system exists */
@@ -53,12 +51,6 @@ static int diskformat(struct img_type *img,
 
 	/* File system does not exist, create new file system */
 	ret = diskformat_mkfs(img->device, fstype);
-
-	/*
-	 * Declare that handler has finished
-	 */
-	swupdate_progress_update(100);
-
 	return ret;
 }
 

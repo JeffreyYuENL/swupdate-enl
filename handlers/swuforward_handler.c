@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2017
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -29,12 +29,12 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <swupdate.h>
 #include <handler.h>
 #include <pthread.h>
 #include <util.h>
 #include <json-c/json.h>
 #include "parselib.h"
-#include "swupdate_image.h"
 #include "swuforward_handler.h"
 
 void swuforward_handler(void);
@@ -70,15 +70,14 @@ static size_t curl_read_data(char *buffer, size_t size, size_t nmemb, void *user
 		nbytes = nmemb * size;
 
 	nbytes = read(conn->fifo[0], buffer, nbytes);
+	if (nbytes == -1 && errno == EAGAIN) {
+		TRACE("No data, try again");
+		nbytes = 0;
+	}
 
 	if (nbytes < 0) {
-		if (errno == EAGAIN) {
-			TRACE("No data, try again");
-			nbytes = 0;
-		} else {
-			ERROR("Cannot read from FIFO");
-			return CURL_READFUNC_ABORT;
-		}
+		ERROR("Cannot read from FIFO");
+		return CURL_READFUNC_ABORT;
 	}
 
 	nmemb = nbytes / size;
@@ -92,7 +91,7 @@ static size_t curl_read_data(char *buffer, size_t size, size_t nmemb, void *user
  * This is the copyimage's callback. When called,
  * there is a buffer to be passed to curl connections
  */
-static int swu_forward_data(void *data, const void *buf, size_t len)
+static int swu_forward_data(void *data, const void *buf, unsigned int len)
 {
 	struct hnd_priv *priv = (struct hnd_priv *)data;
 	ssize_t written;
@@ -293,12 +292,8 @@ static int install_remote_swu(struct img_type *img,
 	struct dict_list_elem *url;
 	struct dict_list *urls;
 	int index = 0;
-	const char *fn_parse_answer = NULL;
 	pthread_attr_t attr;
 	int thread_ret = -1;
-
-	/* Reset list of connections */
-	LIST_INIT(&priv.conns);
 
 	/*
 	 * A single SWU can contains encrypted artifacts,
@@ -321,16 +316,8 @@ static int install_remote_swu(struct img_type *img,
 		return -EINVAL;
 	}
 
-	/*
-	 * Check if a custom function is set to parse the
-	 * answer form the Webserver
-	 */
-	fn_parse_answer = dict_get_value(&img->properties, "parser-function");
-	if (fn_parse_answer && !img->L) {
-		ERROR("Custom parser requires to enable Lua, exiting..");
-		ret = FAILURE;
-		goto handler_exit;
-	}
+	/* Reset list of connections */
+	LIST_INIT(&priv.conns);
 
 	/* initialize CURL */
 	ret = curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -356,14 +343,9 @@ static int install_remote_swu(struct img_type *img,
 			goto handler_exit;
 		}
 
-		/*
-		 * Set parameters to each connection structure
-		 */
 		conn->url = url->value;
 		conn->total_bytes = img->size;
 		conn->SWUpdateStatus = IDLE;
-		conn->L = img->L;
-		conn->fnparser = fn_parse_answer;
 
 		LIST_INSERT_HEAD(&priv.conns, conn, next);
 

@@ -1,5 +1,5 @@
 /* (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -17,33 +17,12 @@
 #include "generated/autoconf.h"
 #include "bsdqueue.h"
 #include "util.h"
+#include "swupdate.h"
 #include "parselib.h"
-#include "parselib-private.h"
 
-static unsigned int map_field_type(field_type_t type)
-{
-	switch (type) {
-	case TYPE_INT:
-		return CONFIG_TYPE_INT;
-	case TYPE_INT64:
-		return CONFIG_TYPE_INT64;
-	case TYPE_STRING:
-		return CONFIG_TYPE_STRING;
-	case TYPE_BOOL:
-		return CONFIG_TYPE_BOOL;
-	case TYPE_FLOAT:
-		return CONFIG_TYPE_FLOAT;
-	default: /* not supported in SWUpdate */
-		return CONFIG_TYPE_NONE;
-	}
-}
-
-
-static void get_value_libconfig(const config_setting_t *e, void *dest, field_type_t expected_type)
+void get_value_libconfig(const config_setting_t *e, void *dest)
 {
 	int type = config_setting_type(e);
-	if (type != map_field_type(expected_type))
-		return;
 	switch (type) {
 	case CONFIG_TYPE_INT:
 		*(int *)dest = config_setting_get_int(e);
@@ -93,27 +72,7 @@ void iterate_field_libconfig(config_setting_t *e, iterate_callback cb, void *dat
 	}
 }
 
-bool is_field_numeric_cfg(config_setting_t *e, const char *path)
-{
-	config_setting_t *elem;
-	int type;
-
-	if (path)
-		elem = config_setting_lookup(e, path);
-	else
-		elem = e;
-
-	if (!elem)
-		return false;
-
-	type = config_setting_type(elem);
-
-	return type == CONFIG_TYPE_INT ||
-	       type == CONFIG_TYPE_INT64 ||
-	       type == CONFIG_TYPE_FLOAT;
-}
-
-void get_field_cfg(config_setting_t *e, const char *path, void *dest, field_type_t type)
+void get_field_cfg(config_setting_t *e, const char *path, void *dest)
 {
 	config_setting_t *elem;
 
@@ -125,7 +84,7 @@ void get_field_cfg(config_setting_t *e, const char *path, void *dest, field_type
 	if (!elem)
 		return;
 
-	get_value_libconfig(elem, dest, type);
+	get_value_libconfig(elem, dest);
 }
 
 const char *get_field_string_libconfig(config_setting_t *e, const char *path)

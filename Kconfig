@@ -7,7 +7,7 @@
 # see scripts/kbuild/config-language.txt.
 #
 
-mainmenu "SWUpdate Configuration"
+mainmenu "Swupdate Configuration"
 
 config HAVE_LINUX
 	bool
@@ -58,8 +58,8 @@ config HAVE_LIBUBOOTENV
 	option env="HAVE_LIBUBOOTENV"
 
 config HAVE_LIBEBGENV
-       bool
-       option env="HAVE_LIBEBGENV"
+	bool
+	option env="HAVE_LIBEBGENV"
 
 config HAVE_LIBEXT2FS
 	bool
@@ -121,7 +121,7 @@ config HAVE_ZCK
 	bool
 	option env="HAVE_ZCK"
 
-menu "SWUpdate Settings"
+menu "Swupdate Settings"
 
 menu "General Configuration"
 
@@ -318,7 +318,7 @@ endmenu
 menu 'Debugging Options'
 
 config DEBUG
-	bool "Build SWUpdate with extra Debugging symbols"
+	bool "Build Swupdate with extra Debugging symbols"
 	default n
 	help
 	  Say Y here if you wish to examine swupdate internals while applets are
@@ -361,12 +361,31 @@ endmenu
 
 endmenu
 
-comment "Bootloader support"
-
 source bootloader/Config.in
 
 
-comment Interfaces
+choice
+	prompt "SSL implementation to use"
+	default SSL_IMPL_OPENSSL
+	help
+	  Select SSL implementation for hashing, verifying and decrypting images.
+
+	config SSL_IMPL_NONE
+		bool "None"
+
+	config SSL_IMPL_OPENSSL
+		bool "OpenSSL"
+		depends on HAVE_LIBSSL
+
+	config SSL_IMPL_WOLFSSL
+		bool "wolfSSL (with OpenSSL compatibility layer)"
+		depends on HAVE_WOLFSSL
+
+	config SSL_IMPL_MBEDTLS
+		bool "mbedTLS"
+		depends on HAVE_MBEDTLS
+
+endchoice
 
 config DOWNLOAD
 	bool "Enable image downloading"
@@ -392,36 +411,6 @@ config CHANNEL_CURL
 	bool
 	depends on HAVE_LIBCURL
 	select CURL
-
-source suricatta/Config.in
-
-source mongoose/Config.in
-
-comment Security
-
-choice
-	prompt "SSL implementation to use"
-	default SSL_IMPL_OPENSSL
-	help
-	  Select SSL implementation for hashing, verifying and decrypting images.
-
-	config SSL_IMPL_NONE
-		bool "None"
-
-	config SSL_IMPL_OPENSSL
-		bool "OpenSSL"
-		depends on HAVE_LIBSSL
-
-	config SSL_IMPL_WOLFSSL
-		bool "wolfSSL (with OpenSSL compatibility layer)"
-		depends on HAVE_WOLFSSL
-
-	config SSL_IMPL_MBEDTLS
-		bool "mbedTLS"
-		depends on HAVE_MBEDTLS
-
-endchoice
-
 
 config CHANNEL_CURL_SSL
 	bool
@@ -505,7 +494,9 @@ config PKCS11
 	  key available in a file. This is implemented with wolfSSL independent
 	  from the SSL implementation and replaces the plain key method.
 
-comment "Compressors (zlib always on)"
+source suricatta/Config.in
+
+source mongoose/Config.in
 
 config GUNZIP
 	bool
@@ -516,8 +507,5 @@ config ZSTD
 	bool "Zstd compression support"
 	depends on HAVE_ZSTD
 
-comment Parsers
 source parser/Config.in
-
-comment Handlers
 source handlers/Config.in

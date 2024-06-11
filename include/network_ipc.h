@@ -1,11 +1,13 @@
 /*
- * (C) Copyright 2013-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2008-2017
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     LGPL-2.1-or-later
  */
 
-#pragma once
+#ifndef _IPC_H
+#define _IPC_H
 
 #include <stdlib.h>
 #include <stdbool.h>
@@ -36,10 +38,7 @@ typedef enum {
 	GET_UPDATE_STATE,
 	REQ_INSTALL_EXT,
 	SET_VERSIONS_RANGE,
-	NOTIFY_STREAM,
-	GET_HW_REVISION,
-	SET_SWUPDATE_VARS,
-	GET_SWUPDATE_VARS,
+	NOTIFY_STREAM
 } msgtype;
 
 /*
@@ -50,8 +49,7 @@ enum {
 	CMD_ACTIVATION,	/* this returns the answer if a SW can be activated */
 	CMD_CONFIG,
 	CMD_ENABLE,	/* Enable or disable suricatta mode */
-	CMD_GET_STATUS,
-	CMD_SET_DOWNLOAD_URL
+	CMD_GET_STATUS
 };
 
 enum run_type {
@@ -117,15 +115,6 @@ typedef union {
 		char maximum_version[256];
 		char current_version[256];
 	} versions;
-	struct {
-		char boardname[256];
-		char revision[256];
-	} revisions;
-	struct {
-		char varnamespace[256];
-		char varname[256];
-		char varvalue[256];
-	} vars;
 } msgdata;
 	
 typedef struct {
@@ -161,4 +150,6 @@ int swupdate_set_version_range(const char *minversion,
 				const char *currentversion);
 #ifdef __cplusplus
 }   // extern "C"
+#endif
+
 #endif

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2008-2020
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     LGPL-2.1-or-later
  */
@@ -11,7 +11,6 @@
 #include <errno.h>
 #include <signal.h>
 #include <pthread.h>
-#include <inttypes.h>
 #include "network_ipc.h"
 
 static pthread_t async_thread_id;
@@ -24,11 +23,7 @@ struct async_lib {
 	terminated	end;
 };
 
-static enum async_thread_state {
-	ASYNC_THREAD_INIT,
-	ASYNC_THREAD_RUNNING,
-	ASYNC_THREAD_DONE
-} running = ASYNC_THREAD_INIT;
+static int handle = 0;
 
 static struct async_lib request;
 
@@ -42,15 +37,14 @@ static void *swupdate_async_thread(void *data)
 	sigset_t saved_mask;
 	struct timespec zerotime = {0, 0};
 	struct async_lib *rq = (struct async_lib *)data;
-	int swupdate_result = FAILURE;
+	int swupdate_result;
 
 	sigemptyset(&sigpipe_mask);
 	sigaddset(&sigpipe_mask, SIGPIPE);
 
 	if (pthread_sigmask(SIG_BLOCK, &sigpipe_mask, &saved_mask) == -1) {
-		perror("pthread_sigmask");
-		swupdate_result = FAILURE;
-		goto out;
+		  perror("pthread_sigmask");
+		    exit(1);
 	}
 	/* Start writing the image until end */
 
@@ -59,13 +53,8 @@ static void *swupdate_async_thread(void *data)
 			break;
 
 		rq->wr(&pbuf, &size);
-		if (size) {
-			if (swupdate_image_write(pbuf, size) != size) {
-				perror("swupdate_image_write failed");
-				swupdate_result = FAILURE;
-				goto out;
-			}
-		}
+		if (size)
+			swupdate_image_write(pbuf, size);
 	} while(size > 0);
 
 	ipc_end(rq->connfd);
@@ -76,22 +65,20 @@ static void *swupdate_async_thread(void *data)
 
 	swupdate_result = ipc_wait_for_complete(rq->get);
 
+	handle = 0;
+
 	if (sigtimedwait(&sigpipe_mask, 0, &zerotime) == -1) {
 		// currently ignored
 	}
 
 	if (pthread_sigmask(SIG_SETMASK, &saved_mask, 0) == -1) {
-		perror("pthread_sigmask");
-		swupdate_result = FAILURE;
-		goto out;
+		  perror("pthread_sigmask");
 	}
 
-out:
-	running = ASYNC_THREAD_DONE;
 	if (rq->end)
 		rq->end((RECOVERY_STATUS)swupdate_result);
 
-	pthread_exit((void*)(intptr_t)(swupdate_result == SUCCESS));
+	pthread_exit(NULL);
 }
 
 /*
@@ -99,21 +86,20 @@ out:
  * to let build the ipc library without
  * linking pctl code
  */
-static void start_ipc_thread(void *(* start_routine) (void *), void *arg)
+static pthread_t start_ipc_thread(void *(* start_routine) (void *), void *arg)
 {
 	int ret;
+	pthread_t id;
 	pthread_attr_t attr;
 
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
 
-	ret = pthread_create(&async_thread_id, &attr, start_routine, arg);
+	ret = pthread_create(&id, &attr, start_routine, arg);
 	if (ret) {
-		perror("ipc thread creation failed");
-		return;
+		exit(1);
 	}
-
-	running = ASYNC_THREAD_RUNNING;
+	return id;
 }
 
 /*
@@ -126,16 +112,8 @@ int swupdate_async_start(writedata wr_func, getstatus status_func,
 	struct async_lib *rq;
 	int connfd;
 
-	switch (running) {
-	case ASYNC_THREAD_INIT:
-		break;
-	case ASYNC_THREAD_DONE:
-		pthread_join(async_thread_id, NULL);
-		running = ASYNC_THREAD_INIT;
-		break;
-	default:
+	if (handle)
 		return -EBUSY;
-	}
 
 	rq = get_request();
 
@@ -150,9 +128,11 @@ int swupdate_async_start(writedata wr_func, getstatus status_func,
 
 	rq->connfd = connfd;
 
-	start_ipc_thread(swupdate_async_thread, rq);
+	async_thread_id = start_ipc_thread(swupdate_async_thread, rq);
 
-	return running != ASYNC_THREAD_INIT;
+	handle++;
+
+	return handle;
 }
 
 int swupdate_image_write(char *buf, int size)

@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <stefano.babic@swupdate.org>
+.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <sbabic@denx.de>
 .. SPDX-License-Identifier: GPL-2.0-only
 
 .. _contents: Table of contents
@@ -13,13 +13,12 @@ Updating an embedded system
 
 SWUpdate provides a reliable way to update
 the software on an embedded system.
-Sources are hosted at https://github.com/sbabic/swupdate. Do not
-forget to `star` SWUpdate.
+Sources are hosted at https://github.com/sbabic/swupdate
 
 .. raw:: html
 
         <center>
-        <a class="github-button" href="https://github.com/sbabic/swupdate" data-icon="octicon-star" data-size="large" aria-label="Star sbabic/swupdate on GitHub">Do not forget to Star SWUpdate on Github</a>
+        <a class="github-button" href="https://github.com/sbabic/swupdate" data-icon="octicon-star" data-size="large" aria-label="Star sbabic/swupdate on GitHub">Star SWUpdate</a>
         <script async defer src="https://buttons.github.io/buttons.js"></script>
         </center>
 
@@ -48,7 +47,6 @@ SWUpdate Documentation
    swupdate-ipc-interface.rst
    progress.rst
    bindings.rst
-   bootloader_interface.rst
    building-with-yocto.rst
    swupdate-best-practise.rst
    delta-update.rst

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2017
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * Hamming code from
  * https://github.com/martinezjavier/writeloader
@@ -25,7 +25,7 @@
 #include <sys/ioctl.h>
 
 #include <mtd/mtd-user.h>
-#include "swupdate_image.h"
+#include "swupdate.h"
 #include "handler.h"
 #include "util.h"
 #include "flash.h"

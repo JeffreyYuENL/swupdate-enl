@@ -1,11 +1,12 @@
 /*
- * (C) Copyright 2012-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2012-2014
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
 
-#pragma once
+#ifndef _MONGOOSE_INTERFACE_H
+#define _MONGOOSE_INTERFACE_H
 
 /*
  * Max number of command line options
@@ -18,3 +19,5 @@
 int start_mongoose(const char *cfgfname, int argc, char *argv[]);
 
 void mongoose_print_help(void);
+
+#endif

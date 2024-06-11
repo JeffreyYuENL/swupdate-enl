@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2021
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -24,9 +24,11 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <swupdate.h>
 #include <handler.h>
 #include <signal.h>
 #include <zck.h>
@@ -35,15 +37,13 @@
 #include <pctl.h>
 #include <pthread.h>
 #include <fs_interface.h>
-#include <sys/mman.h>
 #include "delta_handler.h"
 #include "multipart_parser.h"
+#include "installer.h"
 #include "zchunk_range.h"
-#include "chained_handler.h"
-#include "swupdate_image.h"
 
+#define FIFO_FILE_NAME "deltafifo"
 #define DEFAULT_MAX_RANGES	150	/* Apache has default = 200 */
-#define BUFF_SIZE		16384
 
 const char *handlername = "delta";
 void delta_handler(void);
@@ -91,13 +91,13 @@ struct hnd_priv {
 	char *url;			/* URL to get full ZCK file */
 	char *srcdev;			/* device as source for comparison */
 	char *chainhandler;		/* Handler to pass the decompressed image */
-	struct chain_handler_data chain_handler_data;
 	zck_log_type zckloglevel;	/* if found, set log level for ZCK to this */
 	bool detectsrcsize;		/* if set, try to compute size of filesystem in srcdev */
 	size_t srcsize;			/* Size of source */
 	unsigned long max_ranges;	/* Max allowed ranges (configured via sw-description) */
 	/* Data to be transferred to chain handler */
 	struct img_type img;
+	char fifo[80];
 	int fdout;
 	int fdsrc;
 	zckCtx *tgt;
@@ -326,13 +326,10 @@ static int delta_retrieve_attributes(struct img_type *img, struct hnd_priv *priv
 	char *srcsize;
 	srcsize = dict_get_value(&img->properties, "source-size");
 	if (srcsize) {
-		if (!strcmp(srcsize, "detect")) {
+		if (!strcmp(srcsize, "detect"))
 			priv->detectsrcsize = true;
-		} else {
-			priv->srcsize = ustrtoull(srcsize, NULL, 10);
-			if (errno)
-				WARN("source-size %s: ustrotull failed", srcsize);
-		}
+		else
+			priv->srcsize = ustrtoull(srcsize, 10);
 	}
 
 	char *zckloglevel = dict_get_value(&img->properties, "zckloglevel");
@@ -472,57 +469,74 @@ static void zck_log_toswupdate(const char *function, zck_log_type lt,
 
 /*
  * Create a zck Index from a file
- *
- * If maxbytes has been set, it acts as a limit for the input data.
- * If not (i.e. maxbytes==0), all the file/dev available data is used.
  */
 static bool create_zckindex(zckCtx *zck, int fd, size_t maxbytes)
 {
-	size_t bufsize = BUFF_SIZE;
-	char *buf = malloc(BUFF_SIZE);
-	ssize_t n = 0;
-	size_t count = 0;
-	bool rstatus = true;
+	const size_t bufsize = 16384;
+	char *buf = malloc(bufsize);
+	ssize_t n;
+	int ret;
 
 	if (!buf) {
 		ERROR("OOM creating temporary buffer");
 		return false;
 	}
 	while ((n = read(fd, buf, bufsize)) > 0) {
-		if (zck_write(zck, buf, n) < 0) {
+		ret = zck_write(zck, buf, n);
+		if (ret < 0) {
 			ERROR("ZCK returns %s", zck_get_error(zck));
 			free(buf);
 			return false;
 		}
-
-		if(maxbytes) {
-			/* Keep count only if maxbytes has been set and it's significant*/
-			count += n;
-
-			/* Stop if limit is reached*/
-			if (count >= maxbytes)
-				break;
-
-			/* Be sure read up to maxbytes limit next time */
-			if (BUFF_SIZE > (maxbytes - count))
-				bufsize = maxbytes - count;
-		}
+		if (maxbytes && n > maxbytes)
+			break;
 	}
 
 	free(buf);
-	if (zck_end_chunk(zck) < 0) {
-		ERROR("ZCK failed to create chunk boundary: %s", zck_get_error(zck));
-		return false;
-	}
 
-	if(n < 0) {
-		ERROR("Error occurred while reading data : %s", strerror(errno));
-		rstatus = false;
-	}
-
-	return rstatus;
+	return true;
 }
 
+/*
+ * Thread to start the chained handler.
+ * This received from FIFO the reassembled stream with
+ * the artifact and can pass it to the handler responsible for the install.
+ */
+static void *chain_handler_thread(void *data)
+{
+	struct hnd_priv *priv = (struct hnd_priv *)data;
+	struct img_type *img = &priv->img;
+	unsigned long ret;
+
+	thread_ready();
+	/*
+	 * Try sometimes to open FIFO
+	 */
+	if (!strlen(priv->fifo)) {
+		ERROR("Named FIFO not set, thread exiting !");
+		return (void *)1;
+	}
+	for (int cnt = 5; cnt > 0; cnt--) {
+		img->fdin = open(priv->fifo, O_RDONLY);
+		if (img->fdin > 0)
+			break;
+		sleep(1);
+	}
+	if (img->fdin < 0) {
+		ERROR("Named FIFO cannot be opened, exiting");
+		return (void *)1;
+	}
+
+	img->install_directly = true;
+	ret = install_single_image(img, false);
+
+	if (ret) {
+		ERROR("Chain handler return with Error");
+		close(img->fdin);
+	}
+
+	return (void *)ret;
+}
 
 /*
  * Chunks must be retrieved from network, prepare an send
@@ -760,7 +774,7 @@ static bool copy_network_chunks(zckChunk **dstChunk, struct hnd_priv *priv)
 					return false;
 				}
 			}
-			if (answer->type == RANGE_DATA) {
+			if ((answer->type == RANGE_DATA)) {
 				priv->dwlstate = WAITING_FOR_BOUNDARY;
 			}
 			break;
@@ -777,10 +791,6 @@ static bool copy_network_chunks(zckChunk **dstChunk, struct hnd_priv *priv)
 			priv->dwlstate = WAITING_FOR_FIRST_DATA;
 			break;
 		case WAITING_FOR_FIRST_DATA:
-			if (priv->range_type == SINGLE_RANGE &&
-				multipart_data_complete(priv->parser) != 0)
-				return false;
-
 			if (!fill_buffers_list(priv))
 				return false;
 			priv->dwlstate = WAITING_FOR_DATA;
@@ -789,14 +799,12 @@ static bool copy_network_chunks(zckChunk **dstChunk, struct hnd_priv *priv)
 			if (!read_and_validate_package(priv))
 				return false;
 			answer = priv->answer;
-			if (answer->type == RANGE_COMPLETED) {
+			if ((answer->type == RANGE_COMPLETED)) {
 				priv->dwlstate = END_TRANSFER;
 			} else if (!fill_buffers_list(priv))
 				return false;
 			break;
 		case END_TRANSFER:
-			if (priv->range_type == SINGLE_RANGE)
-				multipart_data_end(priv->parser);
 			dwl_cleanup(priv);
 			priv->dwlstate = NOTRUNNING;
 			*dstChunk = priv->chunk;
@@ -857,8 +865,6 @@ static bool copy_existing_chunks(zckChunk **dstChunk, struct hnd_priv *priv)
 	return true;
 }
 
-#define PIPE_READ  0
-#define PIPE_WRITE 1
 /*
  * Handler entry point
  */
@@ -867,18 +873,17 @@ static int install_delta(struct img_type *img,
 {
 	struct hnd_priv *priv;
 	int ret = -1;
-	int dst_fd = -1, in_fd = -1, mem_fd = -1;
+	int dst_fd = -1, in_fd = -1;
 	zckChunk *iter;
 	zckCtx *zckSrc = NULL, *zckDst = NULL;
 	char *FIFO = NULL;
 	pthread_t chain_handler_thread_id;
-	int pipes[2];
 
 	/*
 	 * No streaming allowed
 	 */
 	if (img->install_directly) {
-		ERROR("Do not set installed-directly with delta, the header cannot be streamed");
+		ERROR("Do not set install-directly with delta, the header cannot be streamed");
 		return -EINVAL;
 	}
 
@@ -914,9 +919,20 @@ static int install_delta(struct img_type *img,
 		goto cleanup;
 	}
 
-	if (pipe(pipes) < 0) {
-		ERROR("Could not create pipes for chained handler, existing...");
-		ret = -EFAULT;
+	if ((asprintf(&FIFO, "%s/%s", get_tmpdir(), FIFO_FILE_NAME) ==
+		ENOMEM_ASPRINTF)) {
+		ERROR("Path too long: %s", get_tmpdir());
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+
+	/*
+	 * FIFO to communicate with the chainhandler thread
+	 */
+	unlink(FIFO);
+	ret = mkfifo(FIFO, 0600);
+	if (ret) {
+		ERROR("FIFO cannot be created in delta handler");
 		goto cleanup;
 	}
 	/*
@@ -992,37 +1008,7 @@ static int install_delta(struct img_type *img,
 			zck_get_error(zckSrc));
 		goto cleanup;
 	}
-
-	mem_fd = memfd_create("zchunk header", 0);
-	if (mem_fd == -1) {
-		ERROR("Cannot create memory file: %s", strerror(errno));
-		goto cleanup;
-	}
-
-	ret = copyfile(img->fdin,
-		&mem_fd,
-		img->size,
-		(unsigned long *)&img->offset,
-		img->seek,
-		0,
-		img->compressed,
-		&img->checksum,
-		img->sha256,
-		img->is_encrypted,
-		img->ivt_ascii,
-		NULL);
-
-	if (ret != 0) {
-		ERROR("Error %d copying zchunk header, aborting.", ret);
-		goto cleanup;
-	}
-
-	if (lseek(mem_fd, 0, SEEK_SET) < 0) {
-		ERROR("Seeking start of memory file");
-		goto cleanup;
-	}
-
-	if (!zck_init_read(zckDst, mem_fd)) {
+	if (!zck_init_read(zckDst, img->fdin)) {
 		ERROR("Unable to read ZCK header from %s : %s",
 			img->fname,
 			zck_get_error(zckDst));
@@ -1047,9 +1033,6 @@ static int install_delta(struct img_type *img,
 		ERROR("Error setting HASH Type %s\n", zck_get_error(zckSrc));
 		goto cleanup;
 	}
-	if (!zck_set_ioption(zckSrc, ZCK_NO_WRITE, 1)) {
-		WARN("ZCK does not support NO Write, use huge amount of RAM %s\n", zck_get_error(zckSrc));
-	}
 
 	if (!create_zckindex(zckSrc, in_fd, priv->srcsize)) {
 		WARN("ZCK Header form %s cannot be created, fallback to full download",
@@ -1069,23 +1052,23 @@ static int install_delta(struct img_type *img,
 
 
 	/* Overwrite some parameters for chained handler */
-	struct chain_handler_data *priv_hnd;
-	priv_hnd = &priv->chain_handler_data;
-	memcpy(&priv_hnd->img, img, sizeof(*img));
-	priv_hnd->img.compressed = COMPRESSED_FALSE;
-	priv_hnd->img.size = uncompressed_size;
-	memset(priv_hnd->img.sha256, 0, SHA256_HASH_LENGTH);
-	strlcpy(priv_hnd->img.type, priv->chainhandler, sizeof(priv_hnd->img.type));
-	priv_hnd->img.fdin = pipes[PIPE_READ];
-	/* zchunk files are not encrypted, CBC is not suitable for range download */
-	priv_hnd->img.is_encrypted = false;
+	memcpy(&priv->img, img, sizeof(*img));
+	priv->img.compressed = COMPRESSED_FALSE;
+	priv->img.size = uncompressed_size;
+	memset(priv->img.sha256, 0, SHA256_HASH_LENGTH);
+	strlcpy(priv->img.type, priv->chainhandler, sizeof(priv->img.type));
+	strlcpy(priv->fifo, FIFO, sizeof(priv->fifo));
 
 	signal(SIGPIPE, SIG_IGN);
 
-	chain_handler_thread_id = start_thread(chain_handler_thread, priv_hnd);
+	chain_handler_thread_id = start_thread(chain_handler_thread, priv);
 	wait_threads_ready();
 
-	priv->fdout = pipes[PIPE_WRITE];
+	priv->fdout = open(FIFO, O_WRONLY);
+	if (priv->fdout < 0) {
+		ERROR("Failed to open FIFO %s", FIFO);
+		goto cleanup;
+	}
 
 	ret = 0;
 
@@ -1106,8 +1089,6 @@ static int install_delta(struct img_type *img,
 		}
 	}
 
-	close(priv->fdout);
-
 	INFO("Total downloaded data : %ld bytes", priv->totaldwlbytes);
 
 	void *status;
@@ -1121,9 +1102,8 @@ static int install_delta(struct img_type *img,
 cleanup:
 	if (zckSrc) zck_free(&zckSrc);
 	if (zckDst) zck_free(&zckDst);
-	if (dst_fd >= 0) close(dst_fd);
-	if (in_fd >= 0) close(in_fd);
-	if (mem_fd >= 0) close(mem_fd);
+	close(dst_fd);
+	close(in_fd);
 	if (FIFO) {
 		unlink(FIFO);
 		free(FIFO);

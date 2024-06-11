@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2018
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     LGPL-2.1-or-later
  */
@@ -279,13 +279,6 @@ static luaL_Reg progress_methods[] = {
     {NULL,          NULL}
 };
 
-/**
- * @brief Connect to SWUpdate progress socket.
- *
- * @param  [Lua] The swupdate_progress class instance.
-   @return [Lua] The connection handle (mostly for information), or,
- *               in case of errors, nil plus an error message.
- */
 static int progress_connect(lua_State *L) {
 	struct prog_obj *p = (struct prog_obj *) auxiliar_checkclass(L, "swupdate_progress", 1);
 	int connfd;
@@ -293,19 +286,12 @@ static int progress_connect(lua_State *L) {
 	close(p->socket);
 	connfd = progress_ipc_connect(WAIT);
 	if (connfd < 0) {
-		lua_pop(L, 1);
 		lua_pushnil(L);
-		lua_pushstring(L, "Cannot connect to SWUpdate progress socket.");
 		return 2;
 	}
 	p->socket = connfd;
 	p->status = IDLE;
-
-	lua_pop(L, 1);
-	lua_pushnumber(L, connfd);
-	lua_pushnil(L);
-
-	return 2;
+	return 1;
 }
 
 static int progress_close(lua_State __attribute__ ((__unused__)) *L) {
@@ -338,17 +324,28 @@ static int progress_receive(lua_State *L) {
 }
 
 static int progress(lua_State *L) {
-	/* allocate progress object */
+
+	int connfd;
+
+	connfd = progress_ipc_connect(WAIT);
+
+	if (connfd < 0) {
+		lua_pushnil(L);
+		return 2;
+	}
+
+	/* allocate   progress object */
 	struct prog_obj *p = (struct prog_obj *) lua_newuserdata(L, sizeof(*p));
-	p->socket = -1;
+	p->socket = connfd;
 	p->status = IDLE;
 
 	/* set its type as master object */
 	auxiliar_setclass(L, "swupdate_progress", -1);
 
 	return 1;
-}
 
+}
+ 
 static const luaL_Reg lua_swupdate[] = {
   {"progress", progress},
   {"control", ctrl},
@@ -361,32 +358,6 @@ static const luaL_Reg lua_swupdate[] = {
  */
 int luaopen_lua_swupdate(lua_State *L){
 	luaL_newlib(L, lua_swupdate);
-
-	/* Export the RECOVERY_STATUS enum */
-	lua_pushstring(L, "RECOVERY_STATUS");
-	lua_newtable (L);
-	LUA_PUSH_INT("IDLE", IDLE);
-	LUA_PUSH_INT("START", START);
-	LUA_PUSH_INT("RUN", RUN);
-	LUA_PUSH_INT("SUCCESS", SUCCESS);
-	LUA_PUSH_INT("FAILURE", FAILURE);
-	LUA_PUSH_INT("DOWNLOAD", DOWNLOAD);
-	LUA_PUSH_INT("DONE", DONE);
-	LUA_PUSH_INT("SUBPROCESS", SUBPROCESS);
-	LUA_PUSH_INT("PROGRESS", PROGRESS);
-	lua_settable(L, -3);
-
-	/* Export the sourcetype enum */
-	lua_pushstring(L, "sourcetype");
-	lua_newtable (L);
-	LUA_PUSH_INT("SOURCE_UNKNOWN", SOURCE_UNKNOWN);
-	LUA_PUSH_INT("SOURCE_WEBSERVER", SOURCE_WEBSERVER);
-	LUA_PUSH_INT("SOURCE_SURICATTA", SOURCE_SURICATTA);
-	LUA_PUSH_INT("SOURCE_DOWNLOADER", SOURCE_DOWNLOADER);
-	LUA_PUSH_INT("SOURCE_LOCAL", SOURCE_LOCAL);
-	LUA_PUSH_INT("SOURCE_CHUNKS_DOWNLOADER", SOURCE_CHUNKS_DOWNLOADER);
-	lua_settable(L, -3);
-
 	auxiliar_newclass(L, "swupdate_progress", progress_methods);
 	auxiliar_newclass(L, "swupdate_control", ctrl_methods);
 	return 1;

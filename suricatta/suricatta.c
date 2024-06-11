@@ -20,69 +20,18 @@
 #include "pctl.h"
 #include "suricatta/suricatta.h"
 #include "suricatta/server.h"
-#include "server_utils.h"
+#include "suricatta_private.h"
 #include "parselib.h"
 #include "swupdate_settings.h"
 #include <network_ipc.h>
-
-/*
- * Needs sem_clockwait which was added in glibc v2.30 on linux.
- */
-#if defined(__linux__) && defined(__GLIBC__) && \
-	(__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 30))
-#define USE_SEM_MONOTONIC 1
-#else
-#define USE_SEM_MONOTONIC 0
-#endif
 
 static bool enable = true;
 static bool trigger = false;
 static struct option long_options[] = {
     {"enable", no_argument, NULL, 'e'},
     {"disable", no_argument, NULL, 'd'},
-    {"server", required_argument, NULL, 'S'},
     {NULL, 0, NULL, 0}};
 static sem_t suricatta_enable_sema;
-
-typedef struct {
-	const char *name;
-	server_t *funcs;
-} server_entry;
-
-static int servers_count = 0;
-static server_entry *servers = NULL;
-static server_t *server = NULL;
-
-bool register_server(const char *name, server_t *srv)
-{
-	if (!name || !srv) {
-		return false;
-	}
-	server_entry *tmp = realloc(servers,
-			(servers_count + 1) * sizeof(server_entry));
-	if (!tmp) {
-		return false;
-	}
-	tmp[servers_count].name = name;
-	tmp[servers_count].funcs = srv;
-	servers_count++;
-	servers = tmp;
-	return true;
-}
-
-static bool set_server(const char *name)
-{
-	if (!name || !strlen(name)) {
-		return false;
-	}
-	for (unsigned int i = 0; i < servers_count; i++) {
-		if (strcmp(name, servers[i].name) == 0) {
-			server = servers[i].funcs;
-			return true;
-		}
-	}
-	return false;
-}
 
 void suricatta_print_help(void)
 {
@@ -91,17 +40,8 @@ void suricatta_print_help(void)
 	    "\tsuricatta arguments (mandatory arguments are marked with '*'):\n"
 	    "\t  -e, --enable      Daemon enabled at startup (default).\n"
 	    "\t  -d, --disable     Daemon disabled at startup.\n"
-	    "\t  -S, --server      Suricatta module to run.\n"
 	    );
-	if (servers_count == 0) {
-		fprintf(stdout, "\tNo compiled-in suricatta modules!\n");
-		return;
-	}
-	for (unsigned int i = 0; i < servers_count; i++) {
-		fprintf(stdout, "\tOptions for suricatta module '%s':\n",
-			servers[i].name);
-		(servers[i].funcs)->help();
-	}
+	server.help();
 }
 
 static server_op_res_t suricatta_enable(ipc_message *msg)
@@ -128,9 +68,9 @@ static server_op_res_t suricatta_enable(ipc_message *msg)
 	else {
 	  /*
 	   * check if polling of server is requested via IPC (trigger)
-	   * This allows the client to force to check if an update is available
+	   * This allows to force to check if an update is available
 	   * on the server. This is useful in case the device is not always
-	   * online, and it just checks for updates (and then update should run
+	   * online, and it just checks for update (and then update should run
 	   * immediately) just when online.
 	   */
 	  json_data = json_get_path_key(
@@ -163,7 +103,7 @@ static server_op_res_t suricatta_ipc(int fd)
 		result = suricatta_enable(&msg);
 		break;
 	default:
-		result = server->ipc(&msg);
+		result = server.ipc(&msg);
 		break;
 	}
 
@@ -177,14 +117,8 @@ static server_op_res_t suricatta_ipc(int fd)
 
 static int suricatta_settings(void *elem, void  __attribute__ ((__unused__)) *data)
 {
-	GET_FIELD_BOOL(LIBCFG_PARSER, elem, "enable",
+	get_field(LIBCFG_PARSER, elem, "enable",
 		&enable);
-
-	char cfg_server[128];
-	GET_FIELD_STRING_RESET(LIBCFG_PARSER, elem, "server", cfg_server);
-	if (strlen(cfg_server) && set_server(cfg_server)) {
-		TRACE("Suricatta module '%s' selected by configuration file.", cfg_server);
-	}
 
 	return 0;
 }
@@ -195,20 +129,12 @@ int suricatta_wait(int seconds)
 	int retval;
 	int enable_entry = enable;
 
-#if USE_SEM_MONOTONIC
-	clock_gettime(CLOCK_MONOTONIC, &tp);
-#else
 	clock_gettime(CLOCK_REALTIME, &tp);
-#endif
-	time_t t_entry = tp.tv_sec;
+	int t_entry = tp.tv_sec;
 
 	tp.tv_sec += seconds;
 	DEBUG("Sleeping for %d seconds.", seconds);
-#if USE_SEM_MONOTONIC
-	retval = sem_clockwait(&suricatta_enable_sema, CLOCK_MONOTONIC, &tp);
-#else
 	retval = sem_timedwait(&suricatta_enable_sema, &tp);
-#endif
 
 	if (retval) {
 		if (errno != ETIMEDOUT) {
@@ -218,12 +144,7 @@ int suricatta_wait(int seconds)
 		/* else: Suricatta awakened because timeout expired */
 	} else {
 		/* suricatta_enable_sema unlocked */
-#if USE_SEM_MONOTONIC
-		clock_gettime(CLOCK_MONOTONIC, &tp);
-#else
-		clock_gettime(CLOCK_REALTIME, &tp);
-#endif
-		time_t t_wake = tp.tv_sec;
+		time_t t_wake = time(NULL);
 
 		TRACE("Suricatta woke up for IPC at %ld seconds", t_wake - t_entry);
 		/*
@@ -240,6 +161,29 @@ int suricatta_wait(int seconds)
 	}
 
 	return 0;
+}
+
+static void *ipc_thread(void __attribute__ ((__unused__)) *data)
+{
+	fd_set readfds;
+	int retval;
+
+	while (1) {
+		FD_ZERO(&readfds);
+		FD_SET(sw_sockfd, &readfds);
+		retval = select(sw_sockfd + 1, &readfds, NULL, NULL, NULL);
+
+		if (retval < 0) {
+			TRACE("Suricatta IPC awakened because of: %s", strerror(errno));
+			return 0;
+		}
+
+		if (retval && FD_ISSET(sw_sockfd, &readfds)) {
+			if (suricatta_ipc(sw_sockfd) != SERVER_OK) {
+				DEBUG("Handling IPC failed!");
+			}
+		}
+	}
 }
 
 int start_suricatta(const char *cfgfname, int argc, char *argv[])
@@ -283,16 +227,9 @@ int start_suricatta(const char *cfgfname, int argc, char *argv[])
 	optind = 1;
 	opterr = 0;
 
-	while ((choice = getopt_long(argc, argv, "deS:",
+	while ((choice = getopt_long(argc, argv, "de",
 				     long_options, NULL)) != -1) {
 		switch (choice) {
-		case 'S':
-			if (!set_server(optarg)) {
-				ERROR("Suricatta module '%s' not registered.", optarg);
-				exit(EXIT_FAILURE);
-			}
-			TRACE("Suricatta module '%s' selected by command line option.", optarg);
-			break;
 		case 'e':
 			enable = true;
 			break;
@@ -301,25 +238,6 @@ int start_suricatta(const char *cfgfname, int argc, char *argv[])
 			break;
 		case '?':
 			break;
-		}
-	}
-	if (!server) {
-		if (servers_count == 0) {
-			ERROR("No compiled-in suricatta modules!");
-			exit(EXIT_FAILURE);
-		}
-		if (servers_count == 1) {
-			if (!set_server(servers[0].name)) {
-				ERROR("Internal Error: One suricatta module "
-				      "available but not found?!");
-				exit(EXIT_FAILURE);
-			}
-			TRACE("Default suricatta module '%s' selected.", servers[0].name);
-
-		} else {
-			ERROR("Multiple suricatta modules available but none "
-			      "selected. See swupdate --help for options.");
-			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -331,12 +249,12 @@ int start_suricatta(const char *cfgfname, int argc, char *argv[])
 	/*
 	 * Start ipc thread here, because the following server.start might block
 	 */
-	start_thread(ipc_thread_fn, suricatta_ipc);
+	start_thread(ipc_thread, NULL);
 
 	/*
 	 * Now start a specific implementation of the server
 	 */
-	if (server->start(cfgfname, argc, serverargv) != SERVER_OK) {
+	if (server.start(cfgfname, argc, serverargv) != SERVER_OK) {
 		exit(EXIT_FAILURE);
 	}
 	free(serverargv);
@@ -345,13 +263,13 @@ int start_suricatta(const char *cfgfname, int argc, char *argv[])
 	while (true) {
 		if (enable || trigger) {
 			trigger = false;
-			switch (server->has_pending_action(&action_id)) {
+			switch (server.has_pending_action(&action_id)) {
 			case SERVER_UPDATE_AVAILABLE:
 				DEBUG("About to process available update.");
-				server->install_update();
+				server.install_update();
 				break;
 			case SERVER_ID_REQUESTED:
-				server->send_target_data();
+				server.send_target_data();
 				trigger = true;
 				break;
 			case SERVER_EINIT:
@@ -363,9 +281,9 @@ int start_suricatta(const char *cfgfname, int argc, char *argv[])
 			}
 		}
 
-		for (int wait_seconds = server->get_polling_interval();
+		for (int wait_seconds = server.get_polling_interval();
 			 wait_seconds > 0;
-			 wait_seconds = min(wait_seconds, (int)server->get_polling_interval())) {
+			 wait_seconds = min(wait_seconds, (int)server.get_polling_interval())) {
 			wait_seconds = suricatta_wait(wait_seconds);
 		}
 

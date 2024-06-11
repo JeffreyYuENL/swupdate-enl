@@ -873,7 +873,6 @@ const char *sym_expand_string_value(const char *in)
 {
 	const char *src;
 	char *res;
-	char *tmp_res;
 	size_t reslen;
 
 	reslen = strlen(in) + 1;
@@ -903,10 +902,7 @@ const char *sym_expand_string_value(const char *in)
 		newlen = strlen(res) + strlen(symval) + strlen(src) + 1;
 		if (newlen > reslen) {
 			reslen = newlen;
-			tmp_res = realloc(res, reslen);
-			if (!tmp_res)
-				free(res);
-			res = tmp_res;
+			res = realloc(res, reslen);
 		}
 
 		strcat(res, symval);

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2015
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -20,7 +20,7 @@
 #include <archive.h>
 #include <archive_entry.h>
 
-#include "swupdate_image.h"
+#include "swupdate.h"
 #include "handler.h"
 #include "util.h"
 
@@ -57,21 +57,18 @@ copy_data(struct archive *ar, struct archive *aw, struct archive_entry *entry)
 			return (ARCHIVE_OK);
 		if (r != ARCHIVE_OK) {
 			if (r == ARCHIVE_WARN) {
-				WARN("archive_read_next_header(): %s for '%s': %s",
-				     archive_error_string(ar), archive_entry_pathname(entry),
-				     strerror(archive_errno(ar)));
+				WARN("archive_read_next_header(): %s for '%s'",
+				     archive_error_string(ar), archive_entry_pathname(entry));
 			} else {
-				ERROR("archive_read_data_block(): %s for '%s': %s",
-				      archive_error_string(ar), archive_entry_pathname(entry),
-				      strerror(archive_errno(ar)));
+				ERROR("archive_read_data_block(): %s for '%s'",
+				      archive_error_string(ar), archive_entry_pathname(entry));
 				return (r);
 			}
 		}
 		r = archive_write_data_block(aw, buff, size, offset);
 		if (r != ARCHIVE_OK) {
-			ERROR("archive_write_data_block(): %s for '%s': %s",
-			      archive_error_string(aw), archive_entry_pathname(entry),
-			      strerror(archive_errno(aw)));
+			ERROR("archive_write_data_block(): %s for '%s'",
+			      archive_error_string(aw), archive_entry_pathname(entry));
 			return (r);
 		}
 	}
@@ -107,11 +104,7 @@ extract(void *p)
 	 *  https://github.com/libarchive/libarchive/wiki/Filenames
 	 */
 	archive_locale = newlocale(LC_CTYPE_MASK, "", (locale_t)0);
-	if (archive_locale == 0) {
-		ERROR("newlocale(): %s", strerror(errno));
-	} else {
-		old_locale = uselocale(archive_locale);
-	}
+	old_locale = uselocale(archive_locale);
 #endif
 
 	a = archive_read_new();
@@ -147,8 +140,8 @@ extract(void *p)
 	}
 
 	if ((r = archive_read_open_filename(a, FIFO, 4096))) {
-		ERROR("archive_read_open_filename(): %s %d: %s",
-		    archive_error_string(a), r, strerror(archive_errno(a)));
+		ERROR("archive_read_open_filename(): %s %d",
+		    archive_error_string(a), r);
 		goto out;
 	}
 	for (;;) {
@@ -157,13 +150,11 @@ extract(void *p)
 			if (r == ARCHIVE_EOF)
 				break;
 			if (r == ARCHIVE_WARN) {
-				WARN("archive_read_next_header(): %s for '%s': %s",
-				    archive_error_string(a), archive_entry_pathname(entry),
-				    strerror(archive_errno(a)));
+				WARN("archive_read_next_header(): %s for '%s'",
+				    archive_error_string(a), archive_entry_pathname(entry));
 			} else {
-				ERROR("archive_read_next_header(): %s: %s",
-				    archive_error_string(a),
-				    strerror(archive_errno(a)));
+				ERROR("archive_read_next_header(): %s",
+				    archive_error_string(a));
 				goto out;
 			}
 		}
@@ -173,9 +164,8 @@ extract(void *p)
 
 		r = archive_write_header(ext, entry);
 		if (r != ARCHIVE_OK) {
-			ERROR("archive_write_header(): %s: %s",
-			      archive_error_string(ext),
-			      strerror(archive_errno(ext)));
+			ERROR("archive_write_header(): %s",
+			      archive_error_string(ext));
 			goto out;
 		}
 
@@ -185,9 +175,8 @@ extract(void *p)
 
 		r = archive_write_finish_entry(ext);
 		if (r != ARCHIVE_OK)  {
-			ERROR("archive_write_finish_entry(): %s for '%s': %s",
-			    archive_error_string(ext), archive_entry_pathname(entry),
-			    strerror(archive_errno(ext)));
+			ERROR("archive_write_finish_entry(): %s for '%s'",
+			    archive_error_string(ext), archive_entry_pathname(entry));
 			goto out;
 		}
 
@@ -199,9 +188,8 @@ out:
 	if (ext) {
 		r = archive_write_free(ext);
 		if (r) {
-			ERROR("archive_write_free(): %s %d: %s",
-				archive_error_string(a), r,
-				strerror(archive_errno(a)));
+			ERROR("archive_write_free(): %s %d",
+					archive_error_string(a), r);
 			exitval = -EFAULT;
 		}
 	}
@@ -214,10 +202,8 @@ out:
 	free(FIFO);
 
 #ifdef CONFIG_LOCALE
-	if (archive_locale != 0) {
-		uselocale(old_locale);
-		freelocale(archive_locale);
-	}
+	uselocale(old_locale);
+	freelocale(archive_locale);
 #endif
 	data->exitval = exitval;
 	pthread_exit(NULL);
@@ -386,7 +372,6 @@ out:
 		}
 	}
 
-	sync();
 	free(DATADST_DIR);
 	free(FIFO);
 

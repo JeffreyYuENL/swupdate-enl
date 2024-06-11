@@ -1,11 +1,13 @@
 /*
- * (C) Copyright 2015-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2015-2017
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     LGPL-2.1-or-later
  */
 
-#pragma once
+#ifndef _SWUPDATE_STATUS_H
+#define _SWUPDATE_STATUS_H
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -39,4 +41,6 @@ typedef enum {
 
 #ifdef __cplusplus
 }   // extern "C"
+#endif
+
 #endif

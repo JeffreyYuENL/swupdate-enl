@@ -1,21 +1,15 @@
 /*
- * (C) Copyright 2013-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2013
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
 
 #include <stdlib.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <errno.h>
-#include <time.h>
-#include <sys/stat.h>
-#if defined(__linux__)
-#include <sys/sysmacros.h>
-#endif
-#include <sys/types.h>
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -25,8 +19,6 @@
 #include "handler.h"
 #include "bootloader.h"
 #include "progress.h"
-#include "swupdate_image.h"
-#include "swupdate.h"
 
 #define LUA_TYPE_PEMBSCR 1
 #define LUA_TYPE_HANDLER 2
@@ -60,19 +52,16 @@ extern const char EMBEDDED_LUA_SRC_END[];
 	lua_settable(L, -3);			\
 } while (0)
 
-typedef void (*stat_push_function) (lua_State *L, struct stat *info);
-struct stat_fields {
-	const char *name;
-	stat_push_function push;
-};
-
+#ifdef CONFIG_HANDLER_IN_LUA
 static int l_register_handler( lua_State *L );
 static int l_call_handler(lua_State *L);
+#endif
 static void image2table(lua_State* L, struct img_type *img);
 static void table2image(lua_State* L, struct img_type *img);
 static void update_table(lua_State* L, struct img_type *img);
 static int luaopen_swupdate(lua_State *L);
 
+#ifdef CONFIG_HANDLER_IN_LUA
 static bool is_type(lua_State *L, uintptr_t type)
 {
 	lua_getglobal(L, "SWUPDATE_LUA_TYPE");
@@ -80,6 +69,7 @@ static bool is_type(lua_State *L, uintptr_t type)
 	lua_pop(L, 1);
 	return ret;
 }
+#endif
 
 static void lua_dump_table(lua_State *L, char *str, struct img_type *img, const char *key)
 {
@@ -189,54 +179,33 @@ void LUAstackDump(lua_State *L)
 	}
 }
 
-static void lua_report_exception(lua_State *L)
-{
-	const char *s = lua_tostring(L, -1);
-
-	TRACE("Lua exception:");
-
-	/* Log one line at a time, so each has the proper prefix */
-	do {
-		int len = strcspn(s, "\n");
-
-		TRACE("%.*s", len, s);
-		s += len;
-	} while (*s++);
-}
-
-int run_lua_script(lua_State *L, const char *script, bool load, const char *function, char *parms)
+int run_lua_script(const char *script, const char *function, char *parms)
 {
 	int ret;
 	const char *output;
 
-	if (!L) {
-		ERROR("Lua script must be executed, but no valid Lua state was set");
-		return -EINVAL;
+	lua_State *L = luaL_newstate(); /* opens Lua */
+	luaL_openlibs(L); /* opens the standard libraries */
+	luaL_requiref(L, "swupdate", luaopen_swupdate, 1 );
+
+	if (luaL_loadfile(L, script)) {
+		ERROR("ERROR loading %s", script);
+		lua_close(L);
+		return -1;
 	}
 
-	if (load) {
-		TRACE("Loading Lua %s script", script);
-		if (luaL_loadfile(L, script)) {
-			ERROR("ERROR loading %s", script);
-			return -1;
-		}
-
-		ret = lua_pcall(L, 0, 0, 0);
-		if (ret) {
-			LUAstackDump(L);
-			ERROR("ERROR preparing Lua script %s %d",
-				script, ret);
-			return -1;
-		}
-	}
-
-	if (!function) {
-		WARN("Script was loaded, no function was set to be executed !");
-		return 0;
+	ret = lua_pcall(L, 0, 0, 0);
+	if (ret) {
+		LUAstackDump(L);
+		ERROR("ERROR preparing Lua script %s %d",
+			script, ret);
+		lua_close(L);
+		return -1;
 	}
 
 	lua_getglobal(L, function);
 	if(!lua_isfunction(L,lua_gettop(L))) {
+		lua_close(L);
 		TRACE("Script : no %s in %s script, exiting", function, script);
 		return 0;
 	}
@@ -247,6 +216,7 @@ int run_lua_script(lua_State *L, const char *script, bool load, const char *func
 	if (lua_pcall(L, 1, 2, 0)) {
 		LUAstackDump(L);
 		ERROR("ERROR Calling Lua script %s", script);
+		lua_close(L);
 		return -1;
 	}
 
@@ -261,6 +231,8 @@ int run_lua_script(lua_State *L, const char *script, bool load, const char *func
 		output = lua_tostring(L, -1);
 		TRACE("Script output: %s script end", output);
 	}
+
+	lua_close(L);
 
 	return ret;
 }
@@ -331,7 +303,7 @@ static void lua_string_to_img(struct img_type *img, const char *key,
 		strncpy(seek_str, value,
 			sizeof(seek_str));
 		/* convert the offset handling multiplicative suffixes */
-		img->seek = ustrtoull(seek_str, NULL, 0);
+		img->seek = ustrtoull(seek_str, 0);
 		if (errno){
 			ERROR("offset argument: ustrtoull failed");
 		}
@@ -373,6 +345,7 @@ static void lua_number_to_img(struct img_type *img, const char *key,
 		img->skip = (unsigned int)val;
 }
 
+#ifdef CONFIG_HANDLER_IN_LUA
 static int l_copy2file(lua_State *L)
 {
 	luaL_checktype(L, 1, LUA_TTABLE);
@@ -391,12 +364,6 @@ static int l_copy2file(lua_State *L)
 	uint32_t checksum = 0;
 
 	table2image(L, &img);
-	if (check_same_file(img.fdin, fdout)) {
-		lua_pop(L, 1);
-		lua_pushinteger(L, -1);
-		lua_pushstring(L, "Output file path is same as input file temporary path");
-		goto copyfile_exit;
-	}
 	int ret = copyfile(img.fdin,
 				 &fdout,
 				 img.size,
@@ -432,7 +399,7 @@ copyfile_exit:
 	return 2;
 }
 
-static int istream_read_callback(void *out, const void *buf, size_t len)
+static int istream_read_callback(void *out, const void *buf, unsigned int len)
 {
 	lua_State* L = (lua_State*)out;
 	if (len > LUAL_BUFFERSIZE) {
@@ -501,6 +468,7 @@ static int l_istream_read(lua_State* L)
 	lua_pushnil(L);
 	return 2;
 }
+#endif
 
 static void update_table(lua_State* L, struct img_type *img)
 {
@@ -568,6 +536,7 @@ static void update_table(lua_State* L, struct img_type *img)
 		}
 		lua_settable(L, -3);
 
+#ifdef CONFIG_HANDLER_IN_LUA
 		if (is_type(L, LUA_TYPE_HANDLER)) {
 			lua_pushstring(L, "copy2file");
 			lua_pushcfunction(L, &l_copy2file);
@@ -577,6 +546,7 @@ static void update_table(lua_State* L, struct img_type *img)
 			lua_pushcfunction(L, &l_istream_read);
 			lua_settable(L, -3);
 		}
+#endif
 
 		lua_getfield(L, -1, "_private");
         LUA_PUSH_IMG_NUMBER(img, "offset", offset);
@@ -590,6 +560,7 @@ static void update_table(lua_State* L, struct img_type *img)
 	}
 }
 
+#ifdef CONFIG_HANDLER_IN_LUA
 #if LUA_VERSION_NUM > 501
 static int l_istream_fclose(lua_State *L)
 {
@@ -597,6 +568,7 @@ static int l_istream_fclose(lua_State *L)
 	lua_pushboolean(L, true);
 	return 1;
 }
+#endif
 #endif
 
 static void image2table(lua_State* L, struct img_type *img)
@@ -625,6 +597,7 @@ static void image2table(lua_State* L, struct img_type *img)
 
 		update_table(L, img);
 
+#ifdef CONFIG_HANDLER_IN_LUA
 		if (is_type(L, LUA_TYPE_HANDLER)) {
 			lua_getfield(L, -1, "_private");
 			lua_pushstring(L, "istream");
@@ -641,6 +614,7 @@ static void image2table(lua_State* L, struct img_type *img)
 			lua_settable(L, -3);
 			lua_pop(L, 1);
 		}
+#endif
 	}
 }
 
@@ -674,6 +648,7 @@ static void table2image(lua_State* L, struct img_type *img) {
 		lua_getfield(L, -1, "_private");
 		lua_getfield(L, -1, "offset");
 		img->offset = (off_t)luaL_checknumber(L, -1);
+#ifdef CONFIG_HANDLER_IN_LUA
 		if (is_type(L, LUA_TYPE_HANDLER)) {
 			lua_pop(L, 1);
 			lua_getfield(L, -1, "istream");
@@ -684,6 +659,7 @@ static void table2image(lua_State* L, struct img_type *img) {
 				img->fdin = fileno(lstream->f);
 			}
 		}
+#endif
 		lua_pop(L,2);
 	}
 }
@@ -834,51 +810,24 @@ l_umount_exit:
 	return 1;
 }
 
-static char* getroot_dev_path(char *prefix, char *devname) {
-	int prefix_len = strlen(prefix);
-	int devname_len = strnlen(devname, PATH_MAX - prefix_len - 1);
-	char *tmp = alloca(sizeof(char) * (prefix_len + devname_len + 1));
-	(void)strcpy(strcpy(tmp, prefix) + prefix_len, devname);
-	char *path = realpath(tmp, NULL);
-	if (path) {
-		int fd = open(path, O_RDWR | O_CLOEXEC);
-		if (fd != -1) {
-			(void)close(fd);
-			return path;
-		}
-		free(path);
-	}
-	return NULL;
-}
-
 static int l_getroot(lua_State *L) {
 	char *rootdev = get_root_device();
 	root_dev_type type = ROOT_DEV_PATH;
 	char **root = NULL;
 	char *value = rootdev;
-	char* dev_path = getroot_dev_path((char*)"", rootdev);
 
 	root = string_split(rootdev, '=');
 	if (count_string_array((const char **)root) > 1) {
 		if (!strncmp(root[0], "UUID", strlen("UUID"))) {
 			type = ROOT_DEV_UUID;
-			dev_path = getroot_dev_path((char*)"/dev/disk/by-uuid/", root[1]);
-		} else if (!strncmp(root[0], "PARTUUID", strlen("PARTUUID"))) {
+		} else if (strncmp(root[0], "PARTUUID", strlen("PARTUUID"))) {
 			type = ROOT_DEV_PARTUUID;
-			dev_path = getroot_dev_path((char*)"/dev/disk/by-partuuid/", root[1]);
-		} else if (!strncmp(root[0], "PARTLABEL", strlen("PARTLABEL"))) {
+		} else if (strncmp(root[0], "PARTLABEL", strlen("PARTLABEL"))) {
 			type = ROOT_DEV_PARTLABEL;
-			dev_path = getroot_dev_path((char*)"/dev/disk/by-partlabel/", root[1]);
 		}
 		value = root[1];
 	}
 	lua_newtable (L);
-	if (dev_path) {
-		lua_pushstring(L, "path");
-		lua_pushstring(L, dev_path);
-		lua_settable(L, -3);
-		free(dev_path);
-	}
 	lua_pushstring(L, "type");
 	lua_pushinteger(L, type);
 	lua_settable(L, -3);
@@ -909,9 +858,6 @@ static int l_set_bootenv(lua_State *L) {
 	const char *name = luaL_checkstring(L, 1);
 	const char *value = luaL_checkstring(L, 2);
 
-	if (!bootenv)
-		return -1;
-
 	if (name && strlen(name))
 		dict_set_value(bootenv, name, value ? value : "");
 	lua_pop(L, 2);
@@ -933,6 +879,7 @@ static int l_get_selection(lua_State *L) {
 }
 
 
+#ifdef CONFIG_HANDLER_IN_LUA
 static int l_get_tmpdir(lua_State *L)
 {
 	lua_pushstring(L, get_tmpdir());
@@ -951,49 +898,7 @@ static int l_progress_update(lua_State *L)
 	swupdate_progress_update((unsigned int) percent);
 	return 0;
 }
-
-static int l_get_hw(lua_State *L)
-{
-	struct swupdate_cfg *cfg = get_swupdate_cfg();
-
-	if (get_hw_revision(&cfg->hw) < 0)
-		goto l_get_hw_exit;
-
-	lua_newtable (L);
-	lua_pushstring(L, "boardname");
-	lua_pushstring(L, cfg->hw.boardname);
-	lua_settable(L, -3);
-	lua_pushstring(L, "revision");
-	lua_pushstring(L, cfg->hw.revision);
-	lua_settable(L, -3);
-	return 1;
-
-l_get_hw_exit:
-	lua_pushnil(L);
-	return 1;
-}
-
-static int l_get_emmc_bootpart(lua_State *L)
-{
-	const char *device = luaL_checkstring(L, 1);
-	int active = -1, fd;
-
-	if (!device) {
-		lua_pushnil(L);
-		return 1;
-	}
-
-	fd = open(device, O_RDONLY);
-	if (fd < 0) {
-		lua_pushnil(L);
-		return 1;
-	}
-
-	active = emmc_get_active_bootpart(fd);
-	close(fd);
-	lua_pushinteger(L, active);
-	return 1;
-}
+#endif
 
 static void lua_push_enum(lua_State *L, const char *name, int value)
 {
@@ -1002,7 +907,7 @@ static void lua_push_enum(lua_State *L, const char *name, int value)
 	lua_settable(L, -3);
 }
 
-int lua_get_swupdate_version(lua_State *L)
+static int l_getversion(lua_State *L)
 {
 	unsigned int version = 0, patchlevel = 0;
 	/* Deliberately ignore sublevel and extraversion. */
@@ -1022,183 +927,6 @@ int lua_get_swupdate_version(lua_State *L)
 	return 1;
 }
 
-/*
- * permssions string - convert st_mode
- * into a rwx string.
- *
- */
-static void push_st_perm (lua_State *L, struct stat *info) {
-	char perms[10];
-	mode_t mode = info->st_mode;
-
-	memset(perms, '-', sizeof(perms) - 1);
-	perms[9] = '\0';
-	if (mode & S_IRUSR) perms[0] = 'r';
-	if (mode & S_IWUSR) perms[1] = 'w';
-	if (mode & S_IXUSR) perms[2] = 'x';
-	if (mode & S_IRGRP) perms[3] = 'r';
-	if (mode & S_IWGRP) perms[4] = 'w';
-	if (mode & S_IXGRP) perms[5] = 'x';
-	if (mode & S_IROTH) perms[6] = 'r';
-	if (mode & S_IWOTH) perms[7] = 'w';
-	if (mode & S_IXOTH) perms[8] = 'x';
-
-	lua_pushstring (L, perms);
-}
-
-static const char *mode2string (mode_t mode)
-{
-	switch (mode & S_IFMT) {
-		case S_IFDIR:
-			return "directory";
-		case S_IFIFO:
-			return "named pipe";
-		case S_IFLNK:
-			return "link";
-		case S_IFREG:
-			return "regular file";
-		case S_IFSOCK:
-			return "socket";
-		case S_IFBLK:
-			return "block device";
-		case S_IFCHR:
-			return "char device";
-		default:
-			return "unknown";
-	}
-}
-
-/*
- * Push a new table with major and minor fields
- */
-static void push_device(lua_State *L, dev_t dev) {
-	lua_newtable (L);
-        lua_pushstring (L, "major");
-        lua_pushinteger (L, (lua_Integer) major(dev));
-        lua_settable(L, -3);
-        lua_pushstring (L, "minor");
-        lua_pushinteger (L, (lua_Integer) minor(dev));
-        lua_settable(L, -3);
-}
-
-/* Inode type */
-static void push_st_mode(lua_State *L, struct stat *info) {
-        lua_pushstring (L, mode2string (info->st_mode));
-}
-
-/* device inode resides on */
-static void push_st_dev(lua_State *L, struct stat *info) {
-	push_device(L, info->st_dev);
-}
-
-/* inode's number */
-static void push_st_ino (lua_State *L, struct stat *info) {
-        lua_pushinteger(L, (lua_Integer) info->st_ino);
-}
-
-/* number of hard links to the file */
-static void push_st_nlink(lua_State *L, struct stat *info) {
-        lua_pushinteger(L, (lua_Integer)info->st_nlink);
-}
-
-/* user-id of owner */
-static void push_st_uid(lua_State *L, struct stat *info) {
-        lua_pushinteger(L, (lua_Integer)info->st_uid);
-}
-
-/* group-id of owner */
-static void push_st_gid(lua_State *L, struct stat *info) {
-        lua_pushinteger(L, (lua_Integer)info->st_gid);
-}
-
-/* device type, for special file inode */
-static void push_st_rdev(lua_State *L, struct stat *info) {
-	push_device(L, info->st_rdev);
-}
-/* time of last access */
-static void push_st_atime(lua_State *L, struct stat *info) {
-        lua_pushstring(L, ctime(&info->st_atime));
-}
-/* time of last data modification */
-static void push_st_mtime(lua_State *L, struct stat *info) {
-        lua_pushstring(L, ctime(&info->st_mtime));
-}
-/* time of last file status change */
-static void push_st_ctime(lua_State *L, struct stat *info) {
-        lua_pushstring(L, ctime(&info->st_ctime));
-}
-/* file size, in bytes */
-static void push_st_size(lua_State *L, struct stat *info) {
-        lua_pushinteger(L, (lua_Integer)info->st_size);
-}
-/* blocks allocated for file */
-static void push_st_blocks(lua_State *L, struct stat *info) {
-        lua_pushinteger(L, (lua_Integer)info->st_blocks);
-}
-/* optimal file system I/O blocksize */
-static void push_st_blksize(lua_State *L, struct stat *info) {
-        lua_pushinteger(L, (lua_Integer)info->st_blksize);
-}
-
-struct stat_fields statfields[] = {
-        { "mode",         push_st_mode },
-        { "dev",          push_st_dev },
-        { "ino",          push_st_ino },
-        { "nlink",        push_st_nlink },
-        { "uid",          push_st_uid },
-        { "gid",          push_st_gid },
-        { "rdev",         push_st_rdev },
-        { "access",       push_st_atime },
-        { "modification", push_st_mtime },
-        { "change",       push_st_ctime },
-        { "size",         push_st_size },
-        { "permissions",  push_st_perm },
-        { "blocks",       push_st_blocks },
-        { "blksize",      push_st_blksize },
-        { NULL, NULL }
-};
-
-static int l_stat(lua_State *L)
-{
-	struct stat st;
-        const char *file = luaL_checkstring (L, 1);
-
-	/* Clean up stack */
-	lua_pop(L, 1);
-        if (stat(file, &st)) {
-                lua_pushnil(L);
-		return 1;
-	}
-	/*
-	 * Return a table with all value
-	 */
-	lua_newtable (L);
-        /* stores all members in table on top of the stack */
-        for (int i = 0; statfields[i].name; i++) {
-                lua_pushstring (L, statfields[i].name);
-                statfields[i].push(L, &st);
-                lua_settable(L, -3);
-        }
-        return 1;
-}
-
-/**
- * @brief Dispatch a message to the progress interface.
- *
- * @param [Lua] Message to dispatch to progress interface.
- * @return [Lua] nil.
- */
-int lua_notify_progress(lua_State *L) {
-  /*
-   * NOTE: level is INFOLEVEL for the sake of specifying a level.
-   * It is unused in core/notifier.c :: progress_notifier() as the
-   * progress emitter doesn't know about log levels.
-   */
-  notify(PROGRESS, RECOVERY_NO_ERROR, INFOLEVEL, luaL_checkstring(L, -1));
-  lua_pop(L, 1);
-  return 0;
-}
-
 /**
  * @brief array with the function which are exported to Lua
  */
@@ -1210,13 +938,9 @@ static const luaL_Reg l_swupdate[] = {
         { "warn", lua_notify_warn },
         { "debug", lua_notify_debug },
         { "mount", l_mount },
-        { "stat", l_stat },
         { "umount", l_umount },
         { "getroot", l_getroot },
-        { "get_hw", l_get_hw },
-        { "getversion", lua_get_swupdate_version },
-        { "progress", lua_notify_progress },
-        { "emmcbootpart", l_get_emmc_bootpart },
+        { "getversion", l_getversion },
         { NULL, NULL }
 };
 
@@ -1227,6 +951,7 @@ static const luaL_Reg l_swupdate_bootenv[] = {
         { NULL, NULL }
 };
 
+#ifdef CONFIG_HANDLER_IN_LUA
 static const luaL_Reg l_swupdate_handler[] = {
         { "register_handler", l_register_handler },
         { "call_handler", l_call_handler },
@@ -1235,6 +960,7 @@ static const luaL_Reg l_swupdate_handler[] = {
 	{ "progress_update", l_progress_update },
         { NULL, NULL }
 };
+#endif
 
 /**
  * @brief function to register the swupdate package in the Lua Stack
@@ -1269,6 +995,7 @@ static int luaopen_swupdate(lua_State *L)
 	lua_push_enum(L, "PARTLABEL", ROOT_DEV_PARTLABEL);
 	lua_settable(L, -3);
 
+#ifdef CONFIG_HANDLER_IN_LUA
 	if (is_type(L, LUA_TYPE_HANDLER)) {
 		/* register handler-specific functions to swupdate module table. */
 		luaL_setfuncs(L, l_swupdate_handler, 0);
@@ -1281,7 +1008,6 @@ static int luaopen_swupdate(lua_State *L)
 		lua_push_enum(L, "SCRIPT_HANDLER", SCRIPT_HANDLER);
 		lua_push_enum(L, "BOOTLOADER_HANDLER", BOOTLOADER_HANDLER);
 		lua_push_enum(L, "PARTITION_HANDLER", PARTITION_HANDLER);
-		lua_push_enum(L, "NO_DATA_HANDLER", NO_DATA_HANDLER);
 		lua_push_enum(L, "ANY_HANDLER", ANY_HANDLER);
 		lua_settable(L, -3);
 
@@ -1294,10 +1020,12 @@ static int luaopen_swupdate(lua_State *L)
 		}
 		lua_settable(L, -3);
 	}
+#endif
 
 	return 1;
 }
 
+#ifdef CONFIG_HANDLER_IN_LUA
 static lua_State *gL = NULL;
 
 /**
@@ -1312,88 +1040,51 @@ static lua_State *gL = NULL;
  * @param index [in] defines which image have to be installed
  * @param unused [in] unused in this context
  * @param data [in] pointer to the index in the Lua registry for the function
- * @param scriptfn [in] installation phase for script handlers, or NONE
- * @return This function returns 0 if successful and != 0 otherwise.
+ * @return This function returns 0 if successful and -1 if unsuccessful.
  */
-static int l_handler_wrapper(struct img_type *img, void *data,
-			     script_fn scriptfn) {
+static int l_handler_wrapper(struct img_type *img, void *data) {
 	int res = 0;
 	lua_Number result;
 	int l_func_ref;
-	lua_State *L;
-	struct installer_handler *hnd;
-	hnd = find_handler(img);
 
-	if (!gL || !img || !data || !hnd) {
+	if (!gL || !img || !data) {
 		return -1;
 	}
 
-	if (hnd->noglobal) {
-		L = img->L;
-	} else {
-		L = gL;
-	}
-
 	if (img->bootloader) {
-		lua_getglobal(L, "swupdate");
-		if (!lua_istable(L, -1)) {
+		lua_getglobal(gL, "swupdate");
+		if (!lua_istable(gL, -1)) {
 			ERROR("Lua stack corrupted.");
 			return -1;
 		}
-		struct dict **udbootenv = lua_newuserdata(L, sizeof(struct dict*));
+		struct dict **udbootenv = lua_newuserdata(gL, sizeof(struct dict*));
 		*udbootenv = img->bootloader;
-		luaL_setfuncs(L, l_swupdate_bootenv, 1);
-		lua_pop(L, 1);
+		luaL_setfuncs(gL, l_swupdate_bootenv, 1);
+		lua_pop(gL, 1);
 	}
 
 	l_func_ref = *((int*)data);
 	/* get the callback function */
-	lua_rawgeti(L, LUA_REGISTRYINDEX, l_func_ref );
-	image2table(L, img);
+	lua_rawgeti(gL, LUA_REGISTRYINDEX, l_func_ref );
+	image2table(gL, img);
 
-	switch (scriptfn) {
-	case PREINSTALL:
-		lua_pushstring(L, "preinst");
-		break;
-	case POSTINSTALL:
-		lua_pushstring(L, "postinst");
-		break;
-	default:
-		lua_pushnil(L);
-		break;
-	}
-
-	if (LUA_OK != (res = lua_pcall(L, 2, 1, 0))) {
+	if (LUA_OK != (res = lua_pcall(gL, 1, 1, 0))) {
 		ERROR("Error %d while executing the Lua callback: %s",
-			  res, lua_tostring(L, -1));
-		lua_pop(L, 1);
+			  res, lua_tostring(gL, -1));
 		return -1;
 	}
 
 	 /* retrieve result */
-	if (!lua_isnumber(L, -1)) {
-		ERROR("Lua Handler must return a number");
-		lua_pop(L, 1);
+	if (!lua_isnumber(gL, -1)) {
+		printf(" Lua Handler must return a number");
 		return -1;
 	}
 
-	result = lua_tonumber(L, -1);
-	lua_pop(L, 1);
+	result = lua_tonumber(gL, -1);
+	lua_pop(gL, 1);
 	TRACE("[Lua handler] returned: %d",(int)result);
 
 	return (int) result;
-}
-
-static int l_script_handler_wrapper(struct img_type *img, void *data)
-{
-	struct script_handler_data *script_data = data;
-
-	return l_handler_wrapper(img, script_data->data, script_data->scriptfn);
-}
-
-static int l_other_handler_wrapper(struct img_type *img, void *data)
-{
-	return l_handler_wrapper(img, data, NONE);
 }
 
 /**
@@ -1407,62 +1098,24 @@ static int l_other_handler_wrapper(struct img_type *img, void *data)
  */
 static int l_register_handler( lua_State *L ) {
 	int *l_func_ref = malloc(sizeof(int));
-	handler_type_t lifetime = GLOBAL_HANDLER;
-
 	if(!l_func_ref) {
 		ERROR("Lua handler: unable to allocate memory");
 		lua_pop(L, 2);
 		return 0;
 	} else {
-		unsigned int mask = ANY_HANDLER & ~SCRIPT_HANDLER;
+		unsigned int mask = ANY_HANDLER;
 		if (lua_isnumber(L, 3)) {
 			mask = luaL_checknumber(L, 3);
 			lua_pop(L, 1);
 		}
-		if ((mask & SCRIPT_HANDLER) &&
-		    (mask & (IMAGE_HANDLER | FILE_HANDLER |
-			     BOOTLOADER_HANDLER | PARTITION_HANDLER))) {
-			/*
-			 * This won't work - script handlers are
-			 * called differently
-			 */
-			ERROR("Lua handler: attempted to register"
-			      " a handler for scripts and non-scripts");
-			free(l_func_ref);
-			lua_pop(L, 1);
-			return 0;
-		}
-
 		const char *handler_desc = luaL_checkstring(L, 1);
-
-		/*
-		 * Check if the handler must be registered globally
-		 * or just during the update
-		 */
-		if (L != gL) {
-			lifetime = SESSION_HANDLER;
-		}
 		/* store the callback function in registry */
 		*l_func_ref = luaL_ref (L, LUA_REGISTRYINDEX);
 		/* cleanup stack */
 		lua_pop (L, 1);
 
-		switch (lifetime) {
-		case GLOBAL_HANDLER:
-			register_handler(handler_desc,
-				 (mask & SCRIPT_HANDLER) ?
-				 l_script_handler_wrapper :
-				 l_other_handler_wrapper,
+		register_handler(handler_desc, l_handler_wrapper,
 				 mask, l_func_ref);
-			break;
-		case SESSION_HANDLER:
-			register_session_handler(handler_desc,
-				 (mask & SCRIPT_HANDLER) ?
-				 l_script_handler_wrapper :
-				 l_other_handler_wrapper,
-				 mask, l_func_ref);
-			break;
-		}
 		return 0;
 	}
 }
@@ -1516,50 +1169,55 @@ call_handler_exit:
 	return 2;
 }
 
-int lua_handlers_init(lua_State *L)
+int lua_handlers_init(void)
 {
-	static const char location[] =
-#if defined(CONFIG_EMBEDDED_LUA_HANDLER)
-		"Compiled-in";
-#else
-		"External";
-#endif
 	int ret = -1;
 
-	if (!L) {
-		gL = luaL_newstate();
-		L = gL;
-	}
-	if (L) {
+	gL = luaL_newstate();
+	if (gL) {
 		/* prime gL as LUA_TYPE_HANDLER */
-		lua_pushlightuserdata(L, (void*)LUA_TYPE_HANDLER);
-		lua_setglobal(L, "SWUPDATE_LUA_TYPE");
+		lua_pushlightuserdata(gL, (void*)LUA_TYPE_HANDLER);
+		lua_setglobal(gL, "SWUPDATE_LUA_TYPE");
 		/* load standard libraries */
-		luaL_openlibs(L);
-		luaL_requiref(L, "swupdate", luaopen_swupdate, 1 );
-		lua_pop(L, 1); /* remove unused copy left on stack */
+		luaL_openlibs(gL);
+		luaL_requiref( gL, "swupdate", luaopen_swupdate, 1 );
+		lua_pop(gL, 1); /* remove unused copy left on stack */
 		/* try to load Lua handlers for the swupdate system */
 #if defined(CONFIG_EMBEDDED_LUA_HANDLER)
-		ret = (luaL_loadbuffer(L, EMBEDDED_LUA_SRC_START, EMBEDDED_LUA_SRC_END-EMBEDDED_LUA_SRC_START, "LuaHandler") ||
-		       lua_pcall(L, 0, LUA_MULTRET, 0));
-#else
-		ret = luaL_dostring(L, "require (\"swupdate_handlers\")");
-#endif
-		if (ret != 0) {
-			INFO("%s Lua handler(s) not found.", location);
-			lua_report_exception(L);
-			lua_pop(L, 1);
+		if ((ret = (luaL_loadbuffer(gL, EMBEDDED_LUA_SRC_START, EMBEDDED_LUA_SRC_END-EMBEDDED_LUA_SRC_START, "LuaHandler") ||
+					lua_pcall(gL, 0, LUA_MULTRET, 0))) != 0) {
+			INFO("No compiled-in Lua handler(s) found.");
+			TRACE("Lua exception:\n%s", lua_tostring(gL, -1));
+			lua_pop(gL, 1);
 		} else {
-			INFO("%s Lua handler(s) found and loaded.", location);
+			INFO("Compiled-in Lua handler(s) found and loaded.");
 		}
+#else
+		if ((ret = luaL_dostring(gL, "require (\"swupdate_handlers\")")) != 0) {
+			INFO("No Lua handler(s) found.");
+			if (luaL_dostring(gL, "return package.path:gsub('?','swupdate_handlers'):gsub(';','\\0')") == 0) {
+				const char *paths = lua_tostring(gL, -2);
+				for (int i=lua_tonumber(gL, -1); i >= 0; i--) {
+					TRACE("\t%s", paths);
+					paths += strlen(paths) + 1;
+				}
+				lua_pop(gL, 2);
+			}
+		} else {
+			INFO("Lua handler(s) found.");
+		}
+#endif
 	} else	{
 		WARN("Unable to register Lua context for callbacks");
 	}
 
 	return ret;
 }
+#else
+int lua_handlers_init(void) {return 0;}
+#endif
 
-lua_State *lua_init(struct dict *bootenv)
+lua_State *lua_parser_init(const char *buf, struct dict *bootenv)
 {
 	lua_State *L = luaL_newstate(); /* opens Lua */
 
@@ -1575,20 +1233,14 @@ lua_State *lua_init(struct dict *bootenv)
 	luaL_setfuncs(L, l_swupdate_bootenv, 1);
 	lua_pop(L, 1); /* remove unused copy left on stack */
 
-	lua_handlers_init(L);
-
-	return L;
-}
-
-int lua_load_buffer(lua_State *L, const char *buf)
-{
 	if (luaL_loadstring(L, buf) || lua_pcall(L, 0, 0, 0)) {
 		LUAstackDump(L);
-		ERROR("ERROR loading Lua code");
-		return 1;
+		ERROR("ERROR preparing Lua embedded script in parser");
+		lua_close(L);
+		return NULL;
 	}
 
-	return 0;
+	return L;
 }
 
 int lua_parser_fn(lua_State *L, const char *fcn, struct img_type *img)
@@ -1615,8 +1267,7 @@ int lua_parser_fn(lua_State *L, const char *fcn, struct img_type *img)
 		return -1;
 	}
 
-	if (loglevel >= DEBUGLEVEL)
-		LUAstackDump(L);
+	LUAstackDump(L);
 
 	ret = lua_toboolean(L, -2) ? 0 : -1;
 
@@ -1629,42 +1280,6 @@ int lua_parser_fn(lua_State *L, const char *fcn, struct img_type *img)
 	lua_pop(L, 2); /* clear stack */
 
 	TRACE("Script returns %d", ret);
-
-	return ret;
-}
-
-int lua_handler_fn(lua_State *L, const char *fcn, const char *parms)
-{
-	int ret = -1;
-
-	lua_getglobal(L, fcn);
-	if(!lua_isfunction(L, lua_gettop(L))) {
-		lua_pop(L, 1);
-		TRACE("Script : no %s in script, exiting", fcn);
-		return -1;
-	}
-
-	/*
-	 * passing arguments
-	 */
-	lua_pushstring(L, parms);
-
-	ret = lua_pcall(L, 1, 1, 0);
-	if (ret || !lua_isinteger(L, -1)) {
-		LUAstackDump(L);
-		ERROR("ERROR Calling Lua %s", fcn);
-		return -1;
-	}
-
-	if (loglevel >= DEBUGLEVEL)
-		LUAstackDump(L);
-
-	ret = lua_tointeger(L, -1);
-
-	lua_pop(L, 1); /* clear stack */
-
-	if (loglevel >= DEBUGLEVEL)
-		TRACE("Script returns %d", ret);
 
 	return ret;
 }

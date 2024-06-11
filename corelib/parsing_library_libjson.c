@@ -1,5 +1,5 @@
 /* (C) Copyright 2016
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -17,27 +17,10 @@
 #include "generated/autoconf.h"
 #include "bsdqueue.h"
 #include "util.h"
+#include "swupdate.h"
 #include "parselib.h"
-#include "parselib-private.h"
 
 #define MAX_URL_LENGTH 2048
-
-static json_type map_field_type(field_type_t type)
-{
-	switch (type) {
-	case TYPE_INT:
-	case TYPE_INT64:
-		return json_type_int;
-	case TYPE_STRING:
-		return json_type_string;
-	case TYPE_BOOL:
-		return json_type_boolean;
-	case TYPE_FLOAT:
-		return json_type_double;
-	default: /* not supported in SWUpdate */
-		return json_type_null;
-	}
-}
 
 json_object *find_json_recursive_node(json_object *root, const char **names)
 {
@@ -120,12 +103,10 @@ const char *get_field_string_json(json_object *e, const char *path)
 	return NULL;
 }
 
-static void get_value_json(json_object *e, void *dest, field_type_t expected_type)
+void get_value_json(json_object *e, void *dest)
 {
 	enum json_type type;
 	type = json_object_get_type(e);
-	if (type != map_field_type(expected_type))
-		return;
 	switch (type) {
 	case json_type_boolean:
 		*(unsigned int *)dest = json_object_get_boolean(e);
@@ -144,32 +125,15 @@ static void get_value_json(json_object *e, void *dest, field_type_t expected_typ
 	}
 }
 
-bool is_field_numeric_json(json_object *e, const char *path)
-{
-	enum json_type type;
-	json_object *fld = NULL;
-
-	if (path) {
-		if (!json_object_object_get_ex(e, path, &fld))
-			return false;
-	} else {
-		fld = e;
-	}
-
-	type = json_object_get_type(fld);
-	return type == json_type_int ||
-	       type == json_type_double;
-}
-
-void get_field_json(json_object *e, const char *path, void *dest, field_type_t type)
+void get_field_json(json_object *e, const char *path, void *dest)
 {
 	json_object *fld = NULL;
 
 	if (path) {
 		if (json_object_object_get_ex(e, path, &fld))
-			get_value_json(fld, dest, type);
+			get_value_json(fld, dest);
 	} else {
-		get_value_json(e, dest, type);
+		get_value_json(e, dest);
 	}
 }
 
@@ -227,7 +191,7 @@ void *find_root_json(json_object *root, const char **nodes, unsigned int depth)
 	 * check for deadlock links, block recursion
 	 */
 	if (!(--depth))
-		return NULL;
+		return false;
 
 	node = find_json_recursive_node(root, nodes);
 

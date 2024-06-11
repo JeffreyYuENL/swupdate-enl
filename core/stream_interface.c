@@ -1,6 +1,7 @@
 /*
- * (C) Copyright 2013-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2008-2013
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -44,7 +45,6 @@
 #include "pctl.h"
 #include "state.h"
 #include "bootloader.h"
-#include "hw-compatibility.h"
 
 #define BUFF_SIZE	 4096
 #define PERCENT_LB_INDEX	4
@@ -67,9 +67,9 @@ static pthread_t network_thread_id;
  * reception of an install request
  *
  */
-bool stream_wkup = false;
+
 pthread_mutex_t stream_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t stream_cond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t stream_wkup = PTHREAD_COND_INITIALIZER;
 
 static struct installer inst;
 
@@ -115,23 +115,6 @@ static int extract_file_to_tmp(int fd, const char *fname, unsigned long *poffs, 
 	close(fdout);
 
 	return 0;
-}
-
-static bool update_transaction_state(struct swupdate_cfg *software, update_state_t newstate)
-{
-	if (!software->parms.dry_run && software->bootloader_transaction_marker) {
-		if (newstate == STATE_INSTALLED)
-			bootloader_env_unset(BOOTVAR_TRANSACTION);
-		else
-			bootloader_env_set(BOOTVAR_TRANSACTION, get_state_string(newstate));
-	}
-	if (!software->parms.dry_run
-	    && software->bootloader_state_marker
-	    && save_state(newstate) != SERVER_OK) {
-		WARN("Cannot persistently store %s update state.", get_state_string(newstate));
-		return false;
-	}
-	return true;
 }
 
 static int extract_files(int fd, struct swupdate_cfg *software)
@@ -183,7 +166,7 @@ static int extract_files(int fd, struct swupdate_cfg *software)
 				return -1;
 			}
 
-			if (check_hw_compatibility(&software->hw, &software->hardware)) {
+			if (check_hw_compatibility(software)) {
 				ERROR("SW not compatible with hardware");
 				return -1;
 			}
@@ -204,7 +187,7 @@ static int extract_files(int fd, struct swupdate_cfg *software)
 				 * to 512 bytes from the socket until the
 				 * client stops writing
 			 	 */
-				extract_padding(fd);
+				extract_padding(fd, &offset);
 				status = STREAM_END;
 				break;
 			}
@@ -271,7 +254,9 @@ static int extract_files(int fd, struct swupdate_cfg *software)
 				 * just once
 				 */
 				if (!installed_directly) {
-					update_transaction_state(software, STATE_IN_PROGRESS);
+					if (!software->parms.dry_run && software->bootloader_transaction_marker) {
+						bootloader_env_set(BOOTVAR_TRANSACTION, get_state_string(STATE_IN_PROGRESS));
+					}
 					installed_directly = true;
 				}
 
@@ -374,6 +359,7 @@ static int save_stream(int fdin, struct swupdate_cfg *software)
 {
 	unsigned char *buf;
 	int fdout = -1, ret, len;
+	const int bufsize = 16 * 1024;
 	int tmpfd = -1;
 	char tmpfilename[MAX_IMAGE_FNAME];
 	struct filehdr fdh;
@@ -382,11 +368,7 @@ static int save_stream(int fdin, struct swupdate_cfg *software)
 	char output_file[MAX_IMAGE_FNAME];
 	const char* TMPDIR = get_tmpdir();
 	bool encrypted_sw_desc = false;
-	int files = 1;
 
-#ifdef CONFIG_SIGNED_IMAGES
-	files = 2; // sw-description and sw-description.sig
-#endif
 #ifdef CONFIG_ENCRYPTED_SW_DESCRIPTION
 	encrypted_sw_desc = true;
 #endif
@@ -395,7 +377,7 @@ static int save_stream(int fdin, struct swupdate_cfg *software)
 
 	snprintf(tmpfilename, sizeof(tmpfilename), "%s/%s", TMPDIR, SW_TMP_OUTPUT);
 
-	buf = (unsigned char *)malloc(sizeof(struct new_ascii_header));
+	buf = (unsigned char *)malloc(bufsize);
 	if (!buf) {
 		ERROR("OOM when saving stream");
 		return -ENOMEM;
@@ -413,46 +395,39 @@ static int save_stream(int fdin, struct swupdate_cfg *software)
 		ret = -EFAULT;
 		goto no_copy_output;
 	}
+	len = read(fdin, buf, bufsize);
+	if (len < 0) {
+		ERROR("Reading from file failed, error %d", errno);
+		ret = -EFAULT;
+		goto no_copy_output;
+	}
+	if (get_cpiohdr(buf, &fdh) < 0) {
+		ERROR("CPIO Header corrupted, cannot be parsed");
+		ret = -EINVAL;
+		goto no_copy_output;
+	}
 
 	/*
-	 * Copy first two cpio blocks (sw-description and sw-description.sig) into tmpfd
+	 * Make an estimation for sw-description and signature.
+	 * Signature cannot be very big - if it is, it is an attack.
+	 * So let a buffer just for the signature - tmpsize is enough for both
+	 * sw-description and sw-description.sig, if any.
 	 */
-	while (files-- > 0) {
-		len = fill_buffer(fdin, buf, sizeof(struct new_ascii_header));
-		if (len < 0) {
-			ERROR("Reading from file failed, error %d", errno);
-			ret = -EFAULT;
-			goto no_copy_output;
-		}
+	tmpsize = SWUPDATE_ALIGN(fdh.size + fdh.namesize + sizeof(struct new_ascii_header) + bufsize - len,
+			bufsize);
+	ret = copy_write(&tmpfd, buf, len);  /* copy the first buffer */
+	if (ret < 0) {
+		ret =  -EIO;
+		goto no_copy_output;
+	}
 
-		if (get_cpiohdr(buf, &fdh) < 0) {
-			ERROR("CPIO Header corrupted, cannot be parsed");
-			ret = -EINVAL;
-			goto no_copy_output;
-		}
-
-		ret = copy_write(&tmpfd, buf, len);
-		if (ret < 0) {
-			ret =  -EIO;
-			goto no_copy_output;
-		}
-
-		/*
-		 * calc remaining bytes of the cpio block
-		 */
-		tmpsize = sizeof(struct new_ascii_header) + fdh.namesize;
-		tmpsize += NPAD_BYTES(tmpsize) + fdh.size;
-		tmpsize += NPAD_BYTES(tmpsize);
-		tmpsize -= sizeof(struct new_ascii_header);
-
-		/*
-		 * copy the remaining bytes to have a complete cpio block
-		 */
-		ret = cpfiles(fdin, tmpfd, tmpsize);
-		if (ret < 0) {
-			ret =  -EIO;
-			goto no_copy_output;
-		}
+	/*
+	 * copy enough bytes to have sw-description and sw-description.sig
+	 */
+	ret = cpfiles(fdin, tmpfd, tmpsize);
+	if (ret < 0) {
+		ret =  -EIO;
+		goto no_copy_output;
 	}
 	lseek(tmpfd, 0, SEEK_SET);
 	offset = 0;
@@ -544,10 +519,7 @@ void *network_initializer(void *data)
 
 		/* wait for someone to issue an install request */
 		pthread_mutex_lock(&stream_mutex);
-		while (stream_wkup != true) {
-			pthread_cond_wait(&stream_cond, &stream_mutex);
-		}
-		stream_wkup = false;
+		pthread_cond_wait(&stream_wkup, &stream_mutex);
 		inst.status = RUN;
 		pthread_mutex_unlock(&stream_mutex);
 		notify(START, RECOVERY_NO_ERROR, INFOLEVEL, "Software Update started !");
@@ -624,40 +596,6 @@ void *network_initializer(void *data)
 		if (!(inst.fd < 0))
 			close(inst.fd);
 
-		if (!software->parms.dry_run && is_bootloader(BOOTLOADER_EBG)) {
-			if (!software->bootloader_transaction_marker) {
-				/*
-				 * EFI Boot Guard's "in_progress" environment variable
-				 * has special semantics hard-coded, hence the
-				 * bootloader transaction marker cannot be disabled.
-				 */
-				TRACE("Note: Setting EFI Boot Guard's 'in_progress' "
-				      "environment variable cannot be disabled.");
-			}
-			if (!software->bootloader_state_marker) {
-				/*
-				 * With a disabled update state marker, there's no
-				 * transaction auto-commit via
-				 *   save_state(STATE_INSTALLED)
-				 * which effectively calls
-				 *   bootloader_env_set(STATE_KEY, STATE_INSTALLED).
-				 * Hence, manually calling save_state(STATE_INSTALLED)
-				 * or equivalent is required to commit the transaction.
-				 * This can be useful to, e.g., terminate the transaction
-				 * from an according progress interface client or an
-				 * SWUpdate suricatta module after it has received an
-				 * update activation request from the remote server.
-				 */
-				TRACE("Note: EFI Boot Guard environment transaction "
-				      "will not be auto-committed.");
-			}
-			if (!software->bootloader_transaction_marker &&
-			    !software->bootloader_state_marker) {
-				WARN("EFI Boot Guard environment modifications will "
-				     "not be persisted.");
-			}
-		}
-
 		/* do carry out the installation (flash programming) */
 		if (ret == 0) {
 			TRACE("Valid image found: copying to FLASH");
@@ -667,42 +605,34 @@ void *network_initializer(void *data)
 			 * must be successful. Set we have
 			 * initiated an update
 			 */
-			update_transaction_state(software, STATE_IN_PROGRESS);
-
-			notify(RUN, RECOVERY_NO_ERROR, INFOLEVEL, "Installation in progress");
-
-			/*
-			 * if this update is signalled to be without reboot (On the Fly),
-			 * send a notification via progress for processes responsible for booting
-			 */
-			if (!software->reboot_required) {
-				swupdate_progress_info(RUN, CAUSE_REBOOT_MODE , "{ \"reboot-mode\" : \"no-reboot\"}");
+			if (!software->parms.dry_run && software->bootloader_transaction_marker) {
+				bootloader_env_set(BOOTVAR_TRANSACTION, get_state_string(STATE_IN_PROGRESS));
 			}
 
+			notify(RUN, RECOVERY_NO_ERROR, INFOLEVEL, "Installation in progress");
 			ret = install_images(software);
 			if (ret != 0) {
-				update_transaction_state(software, STATE_FAILED);
+				if (!software->parms.dry_run && software->bootloader_transaction_marker) {
+					bootloader_env_set(BOOTVAR_TRANSACTION, get_state_string(STATE_FAILED));
+				}
 				notify(FAILURE, RECOVERY_ERROR, ERRORLEVEL, "Installation failed !");
 				inst.last_install = FAILURE;
-
-				/*
-				 * Try to run all POSTFAILURE scripts,
-				 * their result does not change the state that remains FAILURE
-				 * Goal is to restore to the state before update was started
-				 * if this is needed. This is a best case attempt, ERRORs
-				 * are just logged.
-				 */
-				if (!software->parms.dry_run) {
-					if (run_prepost_scripts(&software->scripts, POSTFAILURE)) {
-						WARN("execute POST FAILURE scripts return error, ignoring..");
-					}
+				if (!software->parms.dry_run
+				    && software->bootloader_state_marker
+				    && save_state(STATE_FAILED) != SERVER_OK) {
+					WARN("Cannot persistently store FAILED update state.");
 				}
 			} else {
 				/*
 				 * Clear the recovery variable to indicate to bootloader
 				 * that it is not required to start recovery again
 				 */
-				if (!update_transaction_state(software, STATE_INSTALLED)) {
+				if (!software->parms.dry_run && software->bootloader_transaction_marker) {
+					bootloader_env_unset(BOOTVAR_TRANSACTION);
+				}
+				if (!software->parms.dry_run
+				    && software->bootloader_state_marker
+				    && save_state(STATE_INSTALLED) != SERVER_OK) {
 					ERROR("Cannot persistently store INSTALLED update state.");
 					notify(FAILURE, RECOVERY_ERROR, ERRORLEVEL, "Installation failed !");
 					inst.last_install = FAILURE;
@@ -733,42 +663,9 @@ void *network_initializer(void *data)
 
 		pthread_mutex_lock(&stream_mutex);
 		inst.status = IDLE;
-		inst.req.source = SOURCE_UNKNOWN;
 		pthread_mutex_unlock(&stream_mutex);
 		TRACE("Main thread sleep again !");
 		notify(IDLE, RECOVERY_NO_ERROR, INFOLEVEL, "Waiting for requests...");
-
-		/*
-		 * Last step, if no restart is required,
-		 * SWUpdate can send automatically the feedback.
-		 * They are running on separate processes and should first
-		 * know that the update is completed.
-		 * It seems safe enough to wait uncoditionally for some
-		 * time, enough to let all SWUpdate's processes to be scheduled,
-		 * before sending the IPC message
-		 */
-		if (req->source == SOURCE_SURICATTA &&
-		    /*simple check without JSON */ strstr(req->info, "hawkbit") &&
-		    !software->reboot_required) {
-			ipc_message msg;
-			size_t size = sizeof(msg.data.procmsg.buf);
-			char *buf = msg.data.procmsg.buf;
-			memset(&msg, 0, sizeof(msg));
-			msg.magic = IPC_MAGIC;
-			msg.data.procmsg.source = SOURCE_SURICATTA;
-			msg.data.procmsg.cmd = CMD_ACTIVATION;
-			msg.type = SWUPDATE_SUBPROCESS;
-			snprintf(buf, size, "{ \"status\" : \"%s\", \"finished\" : \"%s\" ,\"execution\" : \"%s\" ,\"details\" : [ ]}",
-				"1",
-				inst.last_install == SUCCESS ? "success" : "failure",
-				"closed"
-				 );
-			sleep(2);
-			TRACE("SEND CONCLUSION TO HAWKBIT");
-			ipc_send_cmd(&msg);
-		}
-
-
 	}
 
 	pthread_exit((void *)0);
@@ -803,17 +700,13 @@ void get_install_running_mode(char *buf, size_t len)
  * The data is not locked because it is retrieve
  * at different times
  */
-int get_install_info(char *buf, size_t len)
+int get_install_info(sourcetype *source, char *buf, size_t len)
 {
 	len = min(len - 1, strlen(inst.req.info));
 	strncpy(buf, inst.req.info, len);
+	*source = inst.req.source;
 
 	return len;
-}
-
-sourcetype get_install_source(void)
-{
-	return inst.req.source;
 }
 
 void set_version_range(const char *minversion,

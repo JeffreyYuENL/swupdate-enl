@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2020
- * Stefano Babic, stefano.babic@swupdate.org.
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -18,7 +18,7 @@
 #include "util.h"
 #include "installer.h"
 
-static pthread_mutex_t install_file_mutex;
+static pthread_mutex_t mymutex;
 
 static char buf[16 * 1024];
 static int fd = STDIN_FILENO;
@@ -51,10 +51,9 @@ static int endupdate(RECOVERY_STATUS status)
 {
 	end_status = (status == SUCCESS) ? EXIT_SUCCESS : EXIT_FAILURE;
 
-	if (status == FAILURE)
-		ERROR("SWUpdate *failed* !");
-	else
-		INFO("SWUpdate was successful !");
+	INFO("Swupdate %s\n",
+		status == FAILURE ? "*failed* !" :
+			"was successful !");
 
 	if (status == SUCCESS) {
 		ipc_message msg;
@@ -64,9 +63,9 @@ static int endupdate(RECOVERY_STATUS status)
 		}
 	}
 
-	pthread_mutex_lock(&install_file_mutex);
+	pthread_mutex_lock(&mymutex);
 	pthread_cond_signal(&cv_end);
-	pthread_mutex_unlock(&install_file_mutex);
+	pthread_mutex_unlock(&mymutex);
 
 	return 0;
 }
@@ -76,7 +75,7 @@ int install_from_file(const char *filename, bool check)
 	int rc;
 	int timeout_cnt = 3;
 
-	if (filename && (fd = open(filename, O_RDONLY|O_CLOEXEC)) < 0) {
+	if (filename && (fd = open(filename, O_RDONLY)) < 0) {
 		fprintf(stderr, "Unable to open %s\n", filename);
 		return EXIT_FAILURE;
 	}
@@ -89,8 +88,6 @@ int install_from_file(const char *filename, bool check)
 	if (check)
 		req.dry_run = RUN_DRYRUN;
 
-	pthread_mutex_init(&install_file_mutex, NULL);
-	pthread_mutex_lock(&install_file_mutex);
 	while (timeout_cnt > 0) {
 		rc = swupdate_async_start(readimage, NULL,
 					  endupdate, &req, sizeof(req));
@@ -103,16 +100,16 @@ int install_from_file(const char *filename, bool check)
 	/* return if we've hit an error scenario */
 	if (rc < 0) {
 		ERROR ("swupdate_async_start returns %d\n", rc);
-		end_status = EXIT_FAILURE;
-		goto out;
+		close(fd);
+		return EXIT_FAILURE;
 	}
 
+	pthread_mutex_init(&mymutex, NULL);
 
 	/* Now block */
-	pthread_cond_wait(&cv_end, &install_file_mutex);
-
-out:
-	pthread_mutex_unlock(&install_file_mutex);
+	pthread_mutex_lock(&mymutex);
+	pthread_cond_wait(&cv_end, &mymutex);
+	pthread_mutex_unlock(&mymutex);
 
 	if (filename)
 		close(fd);

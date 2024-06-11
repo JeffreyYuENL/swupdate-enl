@@ -1,6 +1,7 @@
 /*
- * (C) Copyright 2013-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2013
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -14,7 +15,6 @@
 #include "generated/autoconf.h"
 #include "swupdate.h"
 #include "parsers.h"
-#include "hw-compatibility.h"
 
 #ifdef CONFIG_LUAEXTERNAL
 #include "lua.h"
@@ -69,7 +69,7 @@ static void sw_append_stream(struct img_type *img, const char *key,
 		strlcpy(seek_str, value,
 			sizeof(seek_str));
 		/* convert the offset handling multiplicative suffixes */
-		img->seek = ustrtoull(seek_str, NULL, 0);
+		img->seek = ustrtoull(seek_str, 0);
 		if (errno){
 			ERROR("offset argument: ustrtoull failed");
 		}
@@ -104,8 +104,7 @@ static void sw_append_stream(struct img_type *img, const char *key,
 		img->id.install_if_higher = 1;
 }
 
-int parse_external(struct swupdate_cfg *software, const char *filename,
-		   char __attribute__((__unused__)) **error)
+int parse_external(struct swupdate_cfg *software, const char *filename)
 {
 	int ret;
 	unsigned int nstreams;
@@ -201,9 +200,8 @@ int parse_external(struct swupdate_cfg *software, const char *filename,
 }
 #else
 
-int parse_external(struct swupdate_cfg __attribute__((__unused__)) *software,
-		   const char __attribute__((__unused__)) *filename,
-		   char __attribute__((__unused__)) **error)
+int parse_external(struct swupdate_cfg __attribute__ ((__unused__)) *software,
+			const char __attribute__ ((__unused__)) *filename)
 {
 	return -1;
 }

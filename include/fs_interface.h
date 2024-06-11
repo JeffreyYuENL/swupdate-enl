@@ -1,10 +1,11 @@
 /*
- * Copyright (C) 2021 Stefano Babic <stefano.babic@swupdate.org>
+ * Copyright (C) 2021 Stefano Babic <sbabic@denx.de>
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
 
-#pragma once
+#ifndef _FS_INTERFACE_H
+#define _FS_INTERFACE_H
 
 char *diskformat_fs_detect(char *device);
 int diskformat_fs_exists(char *device, char *fstype);
@@ -20,6 +21,4 @@ extern int ext_mkfs(const char *device_name, const char *fstype, unsigned long f
 		const char *volume_label);
 #endif
 
-#if defined (CONFIG_BTRFS_FILESYSTEM) 
-extern int btrfs_mkfs(const char *device_name, const char *fstype);
 #endif

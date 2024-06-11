@@ -1,11 +1,14 @@
 /*
- * (C) Copyright 2013-2023
- * Stefano Babic <stefano.babic@swupdate.org>
+ * (C) Copyright 2013
+ * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * 	on behalf of ifm electronic GmbH
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
 
-#pragma once
+#ifndef _LUA_UTIL_H
+#define _LUA_UTIL_H
+
 #ifdef CONFIG_LUA
 #include "lua.h"
 #include "lauxlib.h"
@@ -20,42 +23,24 @@ typedef enum {
 } root_dev_type;
 
 void LUAstackDump (lua_State *L);
-int run_lua_script(lua_State *L, const char *script, bool load, const char *function, char *parms);
-lua_State *lua_init(struct dict *bootenv);
-int lua_load_buffer(lua_State *L, const char *buf);
+int run_lua_script(const char *script, const char *function, char *parms);
+lua_State *lua_parser_init(const char *buf, struct dict *bootenv);
 int lua_parser_fn(lua_State *L, const char *fcn, struct img_type *img);
-int lua_handler_fn(lua_State *L, const char *fcn, const char *parms);
-int lua_handlers_init(lua_State *L);
+int lua_handlers_init(void);
 
 int lua_notify_trace(lua_State *L);
 int lua_notify_error(lua_State *L);
 int lua_notify_info(lua_State *L);
 int lua_notify_warn(lua_State *L);
 int lua_notify_debug(lua_State *L);
-int lua_notify_progress(lua_State *L);
 
-int lua_get_swupdate_version(lua_State *L);
-
-#define lua_exit(L) lua_close((lua_State *)L)
-
-#if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM  < 503
-static inline int lua_isinteger (lua_State *L, int index) {
-  if (lua_type(L, index) == LUA_TNUMBER) {
-    lua_Number n = lua_tonumber(L, index);
-    lua_Integer i = lua_tointeger(L, index);
-    if (i == n)
-      return 1;
-  }
-  return 0;
-}
-#endif
+#define lua_parser_exit(L) lua_close((lua_State *)L)
 
 #if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM == 501
 #define LUA_OK 0
 #if !defined(luaL_newlib)
 #define luaL_newlib(L, l) (lua_newtable((L)),luaL_setfuncs((L), (l), 0))
 #endif
-
 void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup);
 void luaL_requiref(lua_State *L, char const* modname, lua_CFunction openf, int glb);
 
@@ -95,19 +80,15 @@ void luaL_pushresult(luaL_Buffer_52 *B);
 
 #else
 
-struct img_type;
-
 #define lua_State void
-#define lua_exit(L)
-#define lua_close(L)
-static inline lua_State *lua_init(struct dict __attribute__ ((__unused__)) *bootenv) { return NULL;}
-static inline int lua_load_buffer(lua_State __attribute__ ((__unused__)) *L, 
-					const char __attribute__ ((__unused__)) *buf) {return 1;}
+#define lua_parser_exit(L)
+static inline lua_State *lua_parser_init(const char __attribute__ ((__unused__)) *buf,
+					 struct dict __attribute__ ((__unused__)) *bootenv) { return NULL;}
 static inline int lua_parser_fn(lua_State __attribute__ ((__unused__)) *L,
 			 const char __attribute__ ((__unused__)) *fcn,
 			 struct img_type __attribute__ ((__unused__)) *img) { return -1; }
-static inline int lua_handler_fn(lua_State __attribute__ ((__unused__)) *L,
-			 const char __attribute__ ((__unused__)) *fcn,
-			 const char __attribute__ ((__unused__)) *parms) { return -1; }
-static inline int lua_handlers_init(lua_State __attribute__ ((__unused__)) *L) { return 0; }
+static inline int lua_handlers_init(void) { return 0; }
+#endif
+
+
 #endif

@@ -18,8 +18,9 @@
 #include <linux/fs.h>
 #endif
 
+#include "swupdate.h"
 #include "handler.h"
-#include "swupdate_image.h"
+#include "sslapi.h"
 #include "util.h"
 
 void readback_handler(void);
@@ -30,8 +31,8 @@ static int readback(struct img_type *img, void *data)
 	if (!data)
 		return -1;
 
-	struct script_handler_data *script_data = data;
-	switch (script_data->scriptfn) {
+	script_fn scriptfn = *(script_fn *)data;
+	switch (scriptfn) {
 	case POSTINSTALL:
 		return readback_postinst(img);
 	case PREINSTALL:
