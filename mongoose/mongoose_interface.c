@@ -3,13 +3,14 @@
  * Stefan Herbrechtsmeier <stefan.herbrechtsmeier@weidmueller.com>
  *
  * (C) Copyright 2013
- * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * Stefano Babic, stefano.babic@swupdate.org.
  *
  * Copyright (c) 2004-2013 Sergey Lyubka
  *
  * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include "swupdate_status.h"
 #define _XOPEN_SOURCE 600  // For PATH_MAX on linux
 
 #include <stddef.h>
@@ -17,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <stdbool.h>
 
 #include <getopt.h>
@@ -359,13 +361,24 @@ static void restart_handler(struct mg_connection *nc, void *ev_data)
 static void broadcast_callback(struct mg_connection *nc, int ev,
 		void __attribute__ ((__unused__)) *ev_data, void __attribute__ ((__unused__)) *fn_data)
 {
+	static uint64_t last_io_time = 0;
 	if (ev == MG_EV_READ) {
 		struct mg_connection *t;
 		for (t = nc->mgr->conns; t != NULL; t = t->next) {
-			if (t->data[0] != 'W') continue;
+			if (!t->is_websocket) continue;
 			mg_ws_send(t,(char *)nc->recv.buf, nc->recv.len, WEBSOCKET_OP_TEXT);
 		}
 		mg_iobuf_del(&nc->recv, 0, nc->recv.len);
+		last_io_time = mg_millis();
+	} else if (ev == MG_EV_POLL) {
+		struct mg_connection *t;
+		uint64_t now = *((uint64_t *)ev_data);
+		if (now < last_io_time + 20000) return;
+		for (t = nc->mgr->conns; t != NULL; t = t->next) {
+			if (!t->is_websocket) continue;
+			mg_ws_send(t, "", 0, WEBSOCKET_OP_PING);
+		}
+		last_io_time = now;
 	}
 }
 
@@ -670,7 +683,6 @@ static void websocket_handler(struct mg_connection *nc, void *ev_data)
 {
 	struct mg_http_message *hm = (struct mg_http_message *) ev_data;
 	mg_ws_upgrade(nc, hm, NULL);
-	nc->data[0] = 'W';
 }
 
 static void ev_handler(struct mg_connection *nc, int ev, void *ev_data, void *fn_data)
@@ -729,7 +741,7 @@ static int mongoose_settings(void *elem, void  __attribute__ ((__unused__)) *dat
 		opts->root = strdup(tmp);
 	}
 
-	get_field(LIBCFG_PARSER, elem, "enable_directory_listing",
+	GET_FIELD_BOOL(LIBCFG_PARSER, elem, "enable_directory_listing",
 		  &opts->listing);
 
 	GET_FIELD_STRING_RESET(LIBCFG_PARSER, elem, "listening_ports", tmp);
@@ -756,9 +768,9 @@ static int mongoose_settings(void *elem, void  __attribute__ ((__unused__)) *dat
 	if (strlen(tmp)) {
 		opts->auth_domain = strdup(tmp);
 	}
-	get_field(LIBCFG_PARSER, elem, "run-postupdate", &run_postupdate);
+	GET_FIELD_BOOL(LIBCFG_PARSER, elem, "run-postupdate", &run_postupdate);
 
-	get_field(LIBCFG_PARSER, elem, "timeout", &watchdog_conn);
+	GET_FIELD_INT(LIBCFG_PARSER, elem, "timeout", &watchdog_conn);
 
 	return 0;
 }
@@ -927,9 +939,9 @@ int start_mongoose(const char *cfgfname, int argc, char *argv[])
 	start_thread(broadcast_message_thread, NULL);
 	start_thread(broadcast_progress_thread, NULL);
 
-	mg_snprintf(buf, sizeof(buf), "%I", 4, &nc->loc);
-	INFO("Mongoose web server version %s with pid %d started on [%s] with web root [%s]",
-		MG_VERSION, getpid(), buf, s_http_server_opts.root_dir);
+	mg_snprintf(buf, sizeof(buf), "%I", 4, &nc->loc.ip);
+	INFO("Mongoose web server v%s with PID %d listening on %s:%" PRIu16 " and serving %s",
+		MG_VERSION, getpid(), buf, mg_ntohs(nc->loc.port), s_http_server_opts.root_dir);
 
 	while (s_signo == 0)
 		mg_mgr_poll(&mgr, 100);

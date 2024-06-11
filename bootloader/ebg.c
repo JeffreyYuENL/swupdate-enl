@@ -113,21 +113,27 @@ static char *_env_get(const char *name)
 	 * value's size in bytes, the second call, with an accordingly
 	 * sized buffer, yields the actual value.
 	 */
-	size_t size = libebg.env_get(&ebgenv, (char *)name, NULL);
-	if (size == 0) {
+	int size = libebg.env_get(&ebgenv, (char *)name, NULL);
+	if (size <= 0) {
 		WARN("Cannot find key %s", name);
 		return NULL;
 	}
 
 	char *value = malloc(size);
 	if (value == NULL) {
-		ERROR("Error allocating memory");
+		ERROR("Error allocating %d bytes of memory to get '%s'", size, name);
 		return NULL;
 	}
 
 	int result = libebg.env_get(&ebgenv, (char *)name, value);
 	if (result != 0) {
 		ERROR("Cannot get %s: %s", name, strerror(-result));
+		free(value);
+		return NULL;
+	}
+	/* ensure value is null-terminated (string) */
+	if (value[size - 1] != '\0') {
+		ERROR("Cannot handle value of key %s", name);
 		free(value);
 		return NULL;
 	}
@@ -195,6 +201,10 @@ static char *do_env_get(const char *name)
 
 static int create_new_environment(void)
 {
+	if (inflight) {
+		DEBUG("Reusing already created new environment.");
+		return 0;
+	}
 	uint32_t revision = _env_to_uint32(_env_get(EBGENV_REVISION));
 	uint8_t in_progress = (uint8_t)_env_to_uint32(_env_get(EBGENV_IN_PROGRESS));
 	if ((revision == UINT_MAX) || (in_progress == UINT8_MAX)) {

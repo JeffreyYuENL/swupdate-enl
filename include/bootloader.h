@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2017
- * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * Stefano Babic <stefano.babic@swupdate.org>
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -12,6 +12,7 @@
 #define BOOTLOADER_NONE  "none"
 #define BOOTLOADER_GRUB  "grub"
 #define BOOTLOADER_UBOOT "uboot"
+#define BOOTLOADER_CBOOT "cboot"
 
 #define load_symbol(handle, container, fname) \
 	*(void**)(container) = dlsym(handle, fname); \

@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <sbabic@denx.de>
+.. SPDX-FileCopyrightText: 2013-2021 Stefano Babic <stefano.babic@swupdate.org>
 .. SPDX-License-Identifier: GPL-2.0-only
 
 .. _contents: Table of contents
@@ -13,7 +13,8 @@ Updating an embedded system
 
 SWUpdate provides a reliable way to update
 the software on an embedded system.
-Sources are hosted at https://github.com/sbabic/swupdate
+Sources are hosted at https://github.com/sbabic/swupdate. Do not
+forget to `star` SWUpdate.
 
 .. raw:: html
 

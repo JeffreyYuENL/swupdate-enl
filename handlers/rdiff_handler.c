@@ -19,7 +19,7 @@
 #if defined(__FreeBSD__)
 #include <sys/param.h>
 #endif
-#include "swupdate.h"
+#include "swupdate_image.h"
 #include "handler.h"
 #include "util.h"
 
@@ -173,7 +173,7 @@ static inline void rdiff_stats(const char* msg, struct rdiff_t *rdiff_state, rs_
 		case RS_RUNNING: strresult = (char*)"RUNNING"; break;
 		default: break;
 	}
-	TRACE("%s avail_in=%ld avail_out=%ld result=%s",
+	TRACE("%s avail_in=%zu avail_out=%zu result=%s",
 		  msg, buffers->avail_in, buffers->avail_out, strresult);
 }
 

@@ -1,6 +1,6 @@
 /*
  * (C) Copyright 2012
- * Stefano Babic, DENX Software Engineering, sbabic@denx.de.
+ * Stefano Babic, stefano.babic@swupdate.org.
  *
  * SPDX-License-Identifier:     GPL-2.0-only
  */
@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #ifdef CONFIG_GUNZIP
 #include <zlib.h>
 #endif
@@ -20,6 +22,7 @@
 
 #include "generated/autoconf.h"
 #include "cpiohdr.h"
+#include "swupdate.h"
 #include "util.h"
 #include "sslapi.h"
 #include "progress.h"
@@ -27,8 +30,6 @@
 #define MODULE_NAME "cpio"
 
 #define BUFF_SIZE	 16384
-
-#define NPAD_BYTES(o) ((4 - (o % 4)) % 4)
 
 typedef enum {
 	INPUT_FROM_FD,
@@ -58,7 +59,7 @@ int get_cpiohdr(unsigned char *buf, struct filehdr *fhdr)
 	return 0;
 }
 
-static int fill_buffer(int fd, unsigned char *buf, unsigned int nbytes, unsigned long *offs,
+static int _fill_buffer(int fd, unsigned char *buf, unsigned int nbytes, unsigned long *offs,
 	uint32_t *checksum, void *dgst)
 {
 	ssize_t len;
@@ -91,29 +92,57 @@ static int fill_buffer(int fd, unsigned char *buf, unsigned int nbytes, unsigned
 	return count;
 }
 
+
+int fill_buffer(int fd, unsigned char *buf, unsigned int nbytes)
+{
+	unsigned long offs = 0;
+	return _fill_buffer(fd, buf, nbytes, &offs, NULL, NULL);
+}
+
 /*
  * Read padding that could exists between the cpio trailer and the end-of-file.
  * cpio aligns the file to 512 bytes
  */
-void extract_padding(int fd, unsigned long *offset)
+void extract_padding(int fd)
 {
     int padding;
     ssize_t len;
 	unsigned char buf[512];
+    int old_flags;
+    struct pollfd pfd;
+    int retval;
 
-    if (fd < 0 || !offset)
+    if (fd < 0)
         return;
 
-    padding = (512 - (*offset % 512)) % 512;
-    if (padding) {
-        TRACE("Expecting %d padding bytes at end-of-file", padding);
+    old_flags = fcntl(fd, F_GETFL);
+    if (old_flags < 0)
+        return;
+    fcntl(fd, F_SETFL, old_flags | O_NONBLOCK);
+
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+
+    padding = 512;
+
+    TRACE("Expecting up to 512 padding bytes at end-of-file");
+    do {
+        retval = poll(&pfd, 1, 1000);
+        if (retval < 0) {
+            DEBUG("Failure while waiting on fd %d: %s", fd, strerror(errno));
+            fcntl(fd, F_SETFL, old_flags);
+            return;
+        }
         len = read(fd, buf, padding);
         if (len < 0) {
             DEBUG("Failure while reading padding %d: %s", fd, strerror(errno));
+            fcntl(fd, F_SETFL, old_flags);
             return;
         }
-    }
+        padding -= len;
+    } while (len > 0 && padding > 0);
 
+    fcntl(fd, F_SETFL, old_flags);
     return;
 }
 
@@ -213,7 +242,7 @@ static int input_step(void *state, void *buffer, size_t size)
 	}
 	switch (s->source) {
 	case INPUT_FROM_FD:
-		ret = fill_buffer(s->fdin, buffer, size, s->offs, &s->checksum, s->dgst);
+		ret = _fill_buffer(s->fdin, buffer, size, s->offs, &s->checksum, s->dgst);
 		if (ret < 0) {
 			return ret;
 		}
@@ -419,7 +448,7 @@ static int __swupdate_copy(int fdin, unsigned char *inbuf, void *out, size_t nby
 	unsigned int md_len = 0;
 	unsigned char *aes_key = NULL;
 	unsigned char *ivt = NULL;
-	unsigned char ivtbuf[16];
+	unsigned char ivtbuf[AES_BLK_SIZE];
 
 	struct InputState input_state = {
 		.fdin = fdin,
@@ -490,7 +519,11 @@ static int __swupdate_copy(int fdin, unsigned char *inbuf, void *out, size_t nby
 
 	if (encrypted) {
 		aes_key = get_aes_key();
-		if (imgivt && strlen(imgivt) && !ascii_to_bin(ivtbuf, sizeof(ivtbuf), imgivt)) {
+		if (imgivt && strlen(imgivt)) {
+			if (!is_hex_str(imgivt) || ascii_to_bin(ivtbuf, sizeof(ivtbuf), imgivt)) {
+				ERROR("Invalid image ivt");
+				return -EINVAL;
+			}
 			ivt = ivtbuf;
 		} else
 			ivt = get_aes_ivt();
@@ -633,15 +666,17 @@ static int __swupdate_copy(int fdin, unsigned char *inbuf, void *out, size_t nby
 			hash_to_ascii(hash, hashstring);
 			hash_to_ascii(md_value, newhashstring);
 
+#ifndef CONFIG_ENCRYPTED_IMAGES_HARDEN_LOGGING
 			ERROR("HASH mismatch : %s <--> %s",
 				hashstring, newhashstring);
+#endif
 			ret = -EFAULT;
 			goto copyfile_exit;
 		}
 	}
 
 	if (!inbuf) {
-		ret = fill_buffer(fdin, buffer, NPAD_BYTES(*offs), offs, checksum, NULL);
+		ret = _fill_buffer(fdin, buffer, NPAD_BYTES(*offs), offs, checksum, NULL);
 		if (ret < 0)
 			DEBUG("Padding bytes are not read, ignoring");
 	}
@@ -729,7 +764,7 @@ int copyimage(void *out, struct img_type *img, writeimage callback)
 int extract_cpio_header(int fd, struct filehdr *fhdr, unsigned long *offset)
 {
 	unsigned char buf[sizeof(fhdr->filename)];
-	if (fill_buffer(fd, buf, sizeof(struct new_ascii_header), offset, NULL, NULL) < 0)
+	if (_fill_buffer(fd, buf, sizeof(struct new_ascii_header), offset, NULL, NULL) < 0)
 		return -EINVAL;
 	if (get_cpiohdr(buf, fhdr) < 0) {
 		ERROR("CPIO Header corrupted, cannot be parsed");
@@ -743,13 +778,13 @@ int extract_cpio_header(int fd, struct filehdr *fhdr, unsigned long *offset)
 		return -EINVAL;
 	}
 
-	if (fill_buffer(fd, buf, fhdr->namesize , offset, NULL, NULL) < 0)
+	if (_fill_buffer(fd, buf, fhdr->namesize , offset, NULL, NULL) < 0)
 		return -EINVAL;
 	buf[fhdr->namesize] = '\0';
 	strlcpy(fhdr->filename, (char *)buf, sizeof(fhdr->filename));
 
 	/* Skip filename padding, if any */
-	if (fill_buffer(fd, buf, (4 - (*offset % 4)) % 4, offset, NULL, NULL) < 0)
+	if (_fill_buffer(fd, buf, (4 - (*offset % 4)) % 4, offset, NULL, NULL) < 0)
 		return -EINVAL;
 
 	return 0;
@@ -773,52 +808,6 @@ int extract_img_from_cpio(int fd, unsigned long offset, struct filehdr *fdh)
 	}
 
 	return 0;
-}
-
-off_t extract_next_file(int fd, int fdout, off_t start, int compressed,
-		int encrypted, char *ivt, unsigned char *hash)
-{
-	int ret;
-	struct filehdr fdh;
-	uint32_t checksum = 0;
-	unsigned long offset = start;
-
-	ret = lseek(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		ERROR("CPIO file corrupted : %s",
-		strerror(errno));
-		return ret;
-	}
-
-	ret = extract_cpio_header(fd, &fdh, &offset);
-	if (ret) {
-		ERROR("CPIO Header wrong");
-		return ret;
-	}
-
-	ret = lseek(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		ERROR("CPIO file corrupted : %s", strerror(errno));
-		return ret;
-	}
-
-	ret = copyfile(fd, &fdout, fdh.size, &offset, 0, 0, compressed, &checksum, hash, encrypted, ivt, NULL);
-	if (ret < 0) {
-		ERROR("Error copying extracted file");
-		return ret;
-	}
-
-	TRACE("Copied file:\n\tfilename %s\n\tsize %u\n\tchecksum 0x%lx %s",
-		fdh.filename,
-		(unsigned int)fdh.size,
-		(unsigned long)checksum,
-		(checksum == fdh.chksum) ? "VERIFIED" : "WRONG");
-
-	if (!swupdate_verify_chksum(checksum, &fdh)) {
-		return -EINVAL;
-	}
-
-	return offset;
 }
 
 int cpio_scan(int fd, struct swupdate_cfg *cfg, off_t start)

@@ -21,19 +21,19 @@ pipenv install
 
 ### pip
 ```
-swupdateclient <path-to-swu> <host_name> [port]
+swupdateclient <path-to-swu> <host_name> [port] [path]
 ```
 
 ### pipenv
 ```
-pipenv run swupdateclient <path-to-swu> <host_name> [port]
+pipenv run swupdateclient <path-to-swu> <host_name> [port] [path]
 ```
 
 
 ## Development
 ### Import from another python program
 ```
-from swupdate_client import SWUpdater
+from swupdateclient.main import SWUpdater
 
 updater = SWUpdater("path-to-swu", "host-name")
 if updater.update():

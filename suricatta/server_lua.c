@@ -12,28 +12,28 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
 #include <lua_util.h>
 
-#ifdef CONFIG_JSON
 #include <json-c/json_visit.h>
-#endif
 
 #include <util.h>
 #include <network_ipc.h>
 #include <progress_ipc.h>
 #include <channel.h>
 #include <channel_curl.h>
-#include <swupdate.h>
 #include <parselib.h>
 #include <state.h>
 #include <bootloader.h>
 #include <swupdate_settings.h>
 #include <swupdate_dict.h>
-#include "suricatta_private.h"
+#include "server_utils.h"
+#include "suricatta/server.h"
 
 #define CONFIG_SECTION "suricatta"
 
@@ -62,11 +62,7 @@ static channel_data_t channel_data_defaults = {
 	.retry_sleep = CHANNEL_DEFAULT_RESUME_DELAY,
 	.retries = CHANNEL_DEFAULT_RESUME_TRIES,
 	.low_speed_timeout = 300,
-#ifdef CONFIG_JSON
-	.format = CHANNEL_PARSE_JSON,
-#else
-	.format = CHANNEL_PARSE_RAW,
-#endif
+	.format = CHANNEL_PARSE_JSON, /* just default, it can be overwritten */
 	.debug = false,
 #ifdef CONFIG_SURICATTA_SSL
 	.usessl = true,
@@ -76,19 +72,6 @@ static channel_data_t channel_data_defaults = {
 	.nofollow = false,
 	.source = SOURCE_SURICATTA,
 };
-
-/*
- * Prototypes for "public" functions implementing the server
- * interface specified in include/suricatta/server.h.
- */
-void server_print_help(void);
-unsigned int server_get_polling_interval(void);
-server_op_res_t server_has_pending_action(int *action_id);
-server_op_res_t server_start(char *fname, int argc, char *argv[]);
-server_op_res_t server_stop(void);
-server_op_res_t server_install_update(void);
-server_op_res_t server_ipc(ipc_message *msg);
-server_op_res_t server_send_target_data(void);
 
 /* Global Lua state for this Suricatta Lua module implementation. */
 static lua_State *gL = NULL;
@@ -179,23 +162,23 @@ typedef struct {
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
 		typeof(name), char*          ), lua_pushstring, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
-		typeof(name), int            ), lua_pushnumber, \
+		typeof(name), int            ), lua_pushinteger, \
 	 (void)0)))(L, name) \
 	); \
 	(__builtin_choose_expr(__builtin_types_compatible_p( \
 		typeof(value), bool          ), lua_pushboolean, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
-		typeof(value), unsigned int  ), lua_pushnumber, \
+		typeof(value), unsigned int  ), lua_pushinteger, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
-		typeof(value), int           ), lua_pushnumber, \
+		typeof(value), int           ), lua_pushinteger, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
-		typeof(value), long long     ), lua_pushnumber, \
+		typeof(value), long long     ), lua_pushinteger, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
-		typeof(value), long          ), lua_pushnumber, \
+		typeof(value), long          ), lua_pushinteger, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
 		typeof(value), double        ), lua_pushnumber, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
-		typeof(value), channel_body_t), lua_pushnumber, \
+		typeof(value), channel_body_t), lua_pushinteger, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
 		typeof(value), char[]         ), lua_pushstring, \
 	 __builtin_choose_expr(__builtin_types_compatible_p( \
@@ -286,8 +269,6 @@ typedef struct {
 					     get_from_table_3(__VA_ARGS__) \
 					     )
 
-
-#ifdef CONFIG_JSON
 /**
  * @brief Push the Lua equivalent of a JSON type to Table on stack top.
  *
@@ -311,8 +292,10 @@ static int json_push_to_table(lua_State *L, json_object *jsobj)
 		lua_pushboolean(L, json_object_get_boolean(jsobj));
 		break;
 	case json_type_double:
-	case json_type_int:
 		lua_pushnumber(L, json_object_get_int(jsobj));
+		break;
+	case json_type_int:
+		lua_pushinteger(L, json_object_get_int(jsobj));
 		break;
 	case json_type_null:
 		/* Lua has no notion of 'null', mimic it by an empty Table. */
@@ -360,7 +343,7 @@ static int json_to_table_callback(json_object *jsobj, int flags,
 	}
 	if (jsobj_index && !jsobj_key) {
 		/* Visiting array element: push to Lua "Array" Table part. */
-		lua_pushnumber(L, (int)*jsobj_index + 1);
+		lua_pushinteger(L, (int)*jsobj_index + 1);
 	} else {
 		/* Visiting object element: push to Lua "Dict" Table part. */
 		lua_pushstring(L, jsobj_key);
@@ -389,8 +372,6 @@ static bool json_to_table(lua_State *L, json_object *json_root)
 	}
 	return true;
 }
-#endif
-
 
 /**
  * @brief Push true or nil to Lua stack according to result argument.
@@ -547,7 +528,11 @@ static void channel_push_options(lua_State *L, channel_data_t *channel_data)
 	push_to_table(L, "sslkey",             channel_data->sslkey);
 	push_to_table(L, "sslcert",            channel_data->sslcert);
 	push_to_table(L, "ciphers",            channel_data->ciphers);
-	push_to_table(L, "proxy",              channel_data->proxy);
+	if (channel_data->proxy && channel_data->proxy == USE_PROXY_ENV) {
+		push_to_table(L, "proxy",      "");
+	} else {
+		push_to_table(L, "proxy",      channel_data->proxy);
+	}
 	push_to_table(L, "info",               channel_data->info);
 	push_to_table(L, "auth_token",         channel_data->auth_token);
 	push_to_table(L, "content_type",       channel_data->content_type);
@@ -589,7 +574,6 @@ static void channel_set_options(lua_State *L, channel_data_t *channel_data)
 	get_from_table(L, "sslkey",             channel_data->sslkey, COPY_DEST);
 	get_from_table(L, "sslcert",            channel_data->sslcert, COPY_DEST);
 	get_from_table(L, "ciphers",            channel_data->ciphers, COPY_DEST);
-	get_from_table(L, "proxy",              channel_data->proxy, COPY_DEST);
 	get_from_table(L, "info",               channel_data->info, COPY_DEST);
 	get_from_table(L, "auth_token",         channel_data->auth_token, COPY_DEST);
 	get_from_table(L, "content_type",       channel_data->content_type, COPY_DEST);
@@ -608,8 +592,19 @@ static void channel_set_options(lua_State *L, channel_data_t *channel_data)
 	get_from_table(L, "max_download_speed", max_download_speed);
 	if (max_download_speed) {
 		channel_data->max_download_speed = (unsigned int)ustrtoull(max_download_speed, NULL, 10);
+		if (errno)
+			WARN("max-download-speed %s: ustrtoull failed",
+			     max_download_speed);
 		free(max_download_speed);
 	}
+	lua_getfield(L, -1, "proxy");
+	if (lua_isstring(L, -1)) {
+		channel_data->proxy = strnlen(lua_tostring(L, -1), 1) > 0
+			? strdup(lua_tostring(L, -1)) : USE_PROXY_ENV;
+	} else {
+		channel_data->proxy = NULL;
+	}
+	lua_pop(L, 1);
 }
 
 
@@ -634,7 +629,9 @@ static void channel_free_options(channel_data_t *channel_data)
 	free(channel_data->sslkey);
 	free(channel_data->sslcert);
 	free(channel_data->ciphers);
-	free(channel_data->proxy);
+	if (channel_data->proxy && channel_data->proxy != USE_PROXY_ENV) {
+		free(channel_data->proxy);
+	}
 	free(channel_data->info);
 }
 
@@ -687,7 +684,7 @@ static int channel_do_operation(lua_State *L, channel_method_t op)
 	if (!udc->channel) {
 		ERROR("Called GET/PUT channel operation on a closed channel.");
 		lua_pushnil(L);
-		lua_pushnumber(L, SERVER_EINIT);
+		lua_pushinteger(L, SERVER_EINIT);
 		lua_newtable(L);
 		return 3;
 	}
@@ -727,51 +724,45 @@ static int channel_do_operation(lua_State *L, channel_method_t op)
 
 	/* Assemble result for passing back to the Lua realm. */
 	push_result(L, result);
-	lua_pushnumber(L, result);
+	lua_pushinteger(L, result);
 	lua_newtable(L);
-	if (op == CHANNEL_GET || channel_data.method == CHANNEL_POST ||
-	    channel_data.method == CHANNEL_PATCH) {
-		push_to_table(L, "http_response_code", channel_data.http_response_code);
-		push_to_table(L, "format",             channel_data.format);
-		#ifdef CONFIG_JSON
-		if (channel_data.format == CHANNEL_PARSE_JSON) {
-			lua_pushstring(L, "json_reply");
-			if (!channel_data.json_reply ||
-			    !json_to_table(L, channel_data.json_reply)) {
-				lua_pushnil(L);
-			}
-			lua_settable(L, -3);
-
-			if (channel_data.json_reply &&
-			    json_object_put(channel_data.json_reply) != 1) {
-				ERROR("JSON object should be freed but was not.");
-			}
+	push_to_table(L, "http_response_code", channel_data.http_response_code);
+	push_to_table(L, "format",             channel_data.format);
+	if (channel_data.format == CHANNEL_PARSE_JSON) {
+		lua_pushstring(L, "json_reply");
+		if (!channel_data.json_reply ||
+			!json_to_table(L, channel_data.json_reply)) {
+			lua_pushnil(L);
 		}
-		#endif
-		if (channel_data.format == CHANNEL_PARSE_RAW) {
-			lua_pushstring(L, "raw_reply");
-			if (!channel_data.raw_reply) {
-				lua_pushnil(L);
-			} else {
-				lua_pushstring(L, channel_data.raw_reply);
-				free(channel_data.raw_reply);
-			}
-			lua_settable(L, -3);
-		}
+		lua_settable(L, -3);
 
-		lua_pushstring(L, "received_headers");
-		lua_newtable(L);
-		if (!LIST_EMPTY(channel_data.received_headers)) {
-			struct dict_entry *entry;
-			LIST_FOREACH(entry, channel_data.received_headers, next) {
-				lua_pushstring(L, dict_entry_get_key(entry));
-				lua_pushstring(L, dict_entry_get_value(entry));
-				lua_settable(L, -3);
-			}
+		if (channel_data.json_reply &&
+			json_object_put(channel_data.json_reply) != 1) {
+			ERROR("JSON object should be freed but was not.");
+		}
+	}
+	if (channel_data.format == CHANNEL_PARSE_RAW) {
+		lua_pushstring(L, "raw_reply");
+		if (!channel_data.raw_reply) {
+			lua_pushnil(L);
+		} else {
+			lua_pushstring(L, channel_data.raw_reply);
+			free(channel_data.raw_reply);
 		}
 		lua_settable(L, -3);
 	}
 
+	lua_pushstring(L, "received_headers");
+	lua_newtable(L);
+	if (!LIST_EMPTY(channel_data.received_headers)) {
+		struct dict_entry *entry;
+		LIST_FOREACH(entry, channel_data.received_headers, next) {
+			lua_pushstring(L, dict_entry_get_key(entry));
+			lua_pushstring(L, dict_entry_get_value(entry));
+			lua_settable(L, -3);
+		}
+	}
+	lua_settable(L, -3);
 	dict_drop_db(&header_send);
 	dict_drop_db(&header_receive);
 
@@ -918,7 +909,7 @@ static void *progress_offloader_thread(void *data)
 
 			(void)pthread_mutex_lock(thread_data->lua_lock);
 			lua_newtable(thread_data->L);
-			push_to_table(thread_data->L, "magic",       message->magic);
+			push_to_table(thread_data->L, "apiversion",  message->apiversion);
 			push_to_table(thread_data->L, "status",      message->status);
 			push_to_table(thread_data->L, "dwl_percent", message->dwl_percent);
 			push_to_table(thread_data->L, "nsteps",      message->nsteps);
@@ -928,7 +919,6 @@ static void *progress_offloader_thread(void *data)
 			push_to_table(thread_data->L, "hnd_name",    (char*)message->hnd_name);
 			push_to_table(thread_data->L, "source",      message->source);
 			push_to_table(thread_data->L, "info",        (char*)message->info);
-			#ifdef CONFIG_JSON
 			if (message->infolen > 0) {
 				lua_pushstring(thread_data->L, "jsoninfo");
 				struct json_object *json_root = json_tokener_parse(
@@ -942,7 +932,6 @@ static void *progress_offloader_thread(void *data)
 				}
 				lua_settable(thread_data->L, -3);
 			}
-			#endif
 			STAILQ_REMOVE_HEAD(&thread_data->progress_msgq, entries);
 			free(qitem);
 			(void)pthread_mutex_unlock(thread_data->progress_msgq_lock);
@@ -1162,7 +1151,7 @@ static void do_install(lua_State *L, int fdout)
 		result = iresult == FAILURE ? SERVER_EERR : SERVER_OK;
 	}
 	push_result(L, result);
-	lua_pushnumber(L, result);
+	lua_pushinteger(L, result);
 	lua_newtable(L);
 	if (ipc_journal) {
 		const char **iter = ipc_journal;
@@ -1178,7 +1167,7 @@ static void do_install(lua_State *L, int fdout)
 	goto done;
 error:
 	lua_pushnil(L);
-	lua_pushnumber(L, SERVER_EINIT);
+	lua_pushinteger(L, SERVER_EINIT);
 	lua_newtable(L);
 done:
 	if (callback_data.progress_msgq_lock) {
@@ -1235,7 +1224,7 @@ static int lua_suricatta_download(lua_State *L)
 		ERROR("Cannot open %s for writing.", luaL_checkstring(L, -1));
 		lua_pop(L, 2);
 		lua_pushnil(L);
-		lua_pushnumber(L, SERVER_EINIT);
+		lua_pushinteger(L, SERVER_EINIT);
 		lua_newtable(L);
 		return 3;
 	}
@@ -1472,20 +1461,13 @@ static int lua_bootloader_env_apply(lua_State *L)
 /**
  * @brief Get update state from persistent storage (bootloader).
  *
- * @return [Lua] True, or, in case of error, nil.
- *         [Lua] One of pstate's enum values.
+ * @return [Lua] One of pstate's enum values.
  */
 static int lua_pstate_get(lua_State *L)
 {
 	update_state_t state = get_state();
-	if (is_valid_state(state)) {
-		lua_pushboolean(L, true);
-		lua_pushnumber(L, (int)state);
-	} else {
-		lua_pushnil(L);
-		lua_pushnil(L);
-	}
-	return 2;
+	lua_pushinteger(L, is_valid_state(state) ? (int)state : STATE_ERROR);
+	return 1;
 }
 
 
@@ -1585,7 +1567,36 @@ static int suricatta_lua_module(lua_State *L)
 	lua_newtable(L);
 	luaL_setfuncs(L, lua_funcs_bootloader_env, 0);
 	lua_settable(L, -3);
+	lua_settable(L, -3);
 
+	lua_pushstring(L, "ipc");
+	lua_newtable(L);
+	lua_pushstring(L, "sourcetype");
+	lua_newtable(L);
+	push_to_table(L, "SOURCE_UNKNOWN", SOURCE_UNKNOWN);
+	push_to_table(L, "SOURCE_WEBSERVER", SOURCE_WEBSERVER);
+	push_to_table(L, "SOURCE_SURICATTA", SOURCE_SURICATTA);
+	push_to_table(L, "SOURCE_DOWNLOADER", SOURCE_DOWNLOADER);
+	push_to_table(L, "SOURCE_LOCAL", SOURCE_LOCAL);
+	push_to_table(L, "SOURCE_CHUNKS_DOWNLOADER", SOURCE_CHUNKS_DOWNLOADER);
+	lua_settable(L, -3);
+	lua_pushstring(L, "RECOVERY_STATUS");
+	lua_newtable(L);
+	push_to_table(L, "IDLE", IDLE);
+	push_to_table(L, "START", START);
+	push_to_table(L, "RUN", RUN);
+	push_to_table(L, "SUCCESS", SUCCESS);
+	push_to_table(L, "FAILURE", FAILURE);
+	push_to_table(L, "DOWNLOAD", DOWNLOAD);
+	push_to_table(L, "DONE", SUBPROCESS);
+	push_to_table(L, "SUBPROCESS", SUBPROCESS);
+	push_to_table(L, "PROGRESS", PROGRESS);
+	lua_settable(L, -3);
+	lua_pushstring(L, "progress_cause");
+	lua_newtable(L);
+	push_to_table(L, "CAUSE_NONE", CAUSE_NONE);
+	push_to_table(L, "CAUSE_REBOOT_MODE", CAUSE_REBOOT_MODE);
+	lua_settable(L, -3);
 	lua_settable(L, -3);
 
 	lua_pushstring(L, "status");
@@ -1630,6 +1641,10 @@ static int suricatta_lua_module(lua_State *L)
 
 	lua_pushstring(L, "options");
 	channel_push_options(L, &channel_data_defaults);
+	lua_settable(L, -3);
+
+	lua_pushstring(L, "USE_PROXY_ENV");
+	lua_pushstring(L, "");
 	lua_settable(L, -3);
 
 	lua_pushstring(L, "content");
@@ -1806,7 +1821,7 @@ static int config_section_to_table(void *setting, void *data)
 			break;
 		case CONFIG_TYPE_BOOL:
 			push_to_table((lua_State *)data, entry->name,
-				      config_setting_get_bool(entry));
+				      (bool)config_setting_get_bool(entry));
 			break;
 		case CONFIG_TYPE_FLOAT:
 			push_to_table((lua_State *)data, entry->name,
@@ -1827,7 +1842,7 @@ static int config_section_to_table(void *setting, void *data)
  * @param  argv   The array of arguments.
  * @return SERVER_OK, or, in case of errors, SERVER_EINIT or SERVER_EERR.
  */
-server_op_res_t server_start(char *fname, int argc, char *argv[])
+static server_op_res_t server_start(const char *fname, int argc, char *argv[])
 {
 	if (suricatta_lua_create() != SERVER_OK) {
 		suricatta_lua_destroy();
@@ -1873,7 +1888,7 @@ server_op_res_t server_start(char *fname, int argc, char *argv[])
  *
  * @return SERVER_OK or, in case of errors, any other from server_op_res_t.
  */
-server_op_res_t server_stop(void)
+static server_op_res_t server_stop(void)
 {
 	server_op_res_t result = map_lua_result(
 	    call_lua_func(gL, SURICATTA_FUNC_SERVER_STOP, 0));
@@ -1885,7 +1900,7 @@ server_op_res_t server_stop(void)
 /**
  * @brief Print the Suricatta Lua module's help text.
  */
-void server_print_help(void)
+static void server_print_help(void)
 {
 	if (suricatta_lua_create() != SERVER_OK) {
 		fprintf(stderr, "Error loading Suricatta Lua module.\n");
@@ -1908,7 +1923,7 @@ void server_print_help(void)
  *
  * @return Polling interval in seconds.
  */
-unsigned int server_get_polling_interval(void)
+static unsigned int server_get_polling_interval(void)
 {
 	int result = call_lua_func(gL, SURICATTA_FUNC_GET_POLLING_INTERVAL, 0);
 	return result >= 0 ? (unsigned int)result : CHANNEL_DEFAULT_POLLING_INTERVAL;
@@ -1923,9 +1938,9 @@ unsigned int server_get_polling_interval(void)
  *         in suricatta/suricatta.c, the others result in suricatta
  *         sleeping again.
  */
-server_op_res_t server_has_pending_action(int *action_id)
+static server_op_res_t server_has_pending_action(int *action_id)
 {
-	lua_pushnumber(gL, *action_id);
+	lua_pushinteger(gL, *action_id);
 	server_op_res_t result = map_lua_result(
 	    call_lua_func(gL, SURICATTA_FUNC_HAS_PENDING_ACTION, 1));
 	if ((lua_gettop(gL) > 0) && (lua_isnumber(gL, -1))) {
@@ -1945,7 +1960,7 @@ server_op_res_t server_has_pending_action(int *action_id)
  *
  * @return SERVER_OK or, in case of errors, any other from server_op_res_t.
  */
-server_op_res_t server_install_update(void)
+static server_op_res_t server_install_update(void)
 {
 	return map_lua_result(call_lua_func(gL, SURICATTA_FUNC_INSTALL_UPDATE, 0));
 }
@@ -1956,7 +1971,7 @@ server_op_res_t server_install_update(void)
  *
  * @return SERVER_OK or, in case of errors, any other from server_op_res_t.
  */
-server_op_res_t server_send_target_data(void)
+static server_op_res_t server_send_target_data(void)
 {
 	return map_lua_result(call_lua_func(gL, SURICATTA_FUNC_SEND_TARGET_DATA, 0));
 }
@@ -1968,7 +1983,7 @@ server_op_res_t server_send_target_data(void)
  * @param  msg  IPC message.
  * @return SERVER_OK or, in case of errors, any other from server_op_res_t.
  */
-server_op_res_t server_ipc(ipc_message *msg)
+static server_op_res_t server_ipc(ipc_message *msg)
 {
 	lua_newtable(gL);
 	push_to_table(gL, "magic",      msg->magic);
@@ -1983,7 +1998,6 @@ server_op_res_t server_ipc(ipc_message *msg)
 	lua_pushstring(gL, "msg");
 	lua_pushlstring(gL, (char *)msg->data.procmsg.buf, msg->data.procmsg.len);
 	lua_settable(gL, -3);
-	#ifdef CONFIG_JSON
 	if (msg->data.procmsg.len > 0) {
 		lua_pushstring(gL, "json");
 		struct json_object *json_root = json_tokener_parse(msg->data.procmsg.buf);
@@ -1996,7 +2010,6 @@ server_op_res_t server_ipc(ipc_message *msg)
 			ERROR("JSON object should be freed but was not.");
 		}
 	}
-	#endif
 	server_op_res_t result = map_lua_result(call_lua_func(gL, SURICATTA_FUNC_IPC, 1));
 	msg->type = result == SERVER_OK ? ACK : NACK;
 	msg->data.procmsg.len = 0;
@@ -2013,4 +2026,21 @@ server_op_res_t server_ipc(ipc_message *msg)
 		lua_pop(gL, 1);
 	}
 	return result;
+}
+
+static server_t server = {
+	.has_pending_action = &server_has_pending_action,
+	.install_update = &server_install_update,
+	.send_target_data = &server_send_target_data,
+	.get_polling_interval = &server_get_polling_interval,
+	.start = &server_start,
+	.stop = &server_stop,
+	.ipc = &server_ipc,
+	.help = &server_print_help,
+};
+
+__attribute__((constructor))
+static void register_server_lua(void)
+{
+	register_server("lua", &server);
 }
